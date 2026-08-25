@@ -16,11 +16,26 @@ from sklearn.metrics.pairwise import cosine_similarity
 import config
 
 
+def _simple_stem(word: str) -> str:
+    """
+    Deliberately simple, dependency-free stemming so near-matches like
+    "font"/"fonts", "notification"/"notifications", "update"/"updating"
+    collide in the TF-IDF space instead of missing each other on exact
+    token equality. Doesn't need to be linguistically perfect -- it just
+    needs to help candidate generation; the LLM makes the real decision.
+    """
+    for suffix, replacement in (("ies", "y"), ("ing", ""), ("edly", ""), ("es", ""), ("ed", ""), ("s", "")):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            return word[: -len(suffix)] + replacement
+    return word
+
+
 def _tokenize(text: str):
-    return re.findall(r"[a-z0-9_'-]+", text.lower())
+    return [_simple_stem(t) for t in re.findall(r"[a-z0-9_'-]+", text.lower())]
 
 
-STOP = {"the", "a", "an", "to", "for", "me", "my", "please", "can", "you", "i", "want", "do", "it", "on"}
+STOP = {_simple_stem(w) for w in
+        {"the", "a", "an", "to", "for", "me", "my", "please", "can", "you", "i", "want", "do", "it", "on"}}
 
 SYNONYMS = {
     "wifi": "wireless internet network connection wi-fi",
@@ -51,6 +66,14 @@ SYNONYMS = {
     "space": "storage disk drive capacity",
     "restart": "reboot relaunch",
     "shutdown": "power off turn off",
+    "antivirus": "windows security defender protection virus malware safety",
+    "virus": "windows security defender protection antivirus malware",
+    "password": "sign-in signin login credentials security",
+    "login": "sign-in signin password credentials",
+    "dark": "colors theme themes appearance personalization",
+    "theme": "colors themes personalization appearance",
+    "faster": "performance startup processes storage",
+    "slow": "performance startup processes storage",
 }
 
 NORMALIZATIONS = {

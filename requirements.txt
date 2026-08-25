@@ -1,7 +1,21 @@
-huggingface_hub>=0.34.0
+requests>=2.31.0
 python-dotenv>=1.0.1
 scikit-learn>=1.5.0
-anthropic>=0.60.0
+
+# --- optional: real local semantic Tier 2 (embeddings.py) -- catches
+# paraphrases TF-IDF Tier 2 can't. ~30MB model download on first run,
+# ONNX-based (no torch). Without it the app still runs fine; semantic Tier 2
+# just stays permanently "not available" and everything falls back a tier.
+fastembed>=0.3.0
+
+# --- optional: enables real launch verification (tool_router.py / verification.py) --
+# without it the app still runs, launches just aren't independently confirmed
+psutil>=5.9.0
+
+# --- optional, only needed for whichever LLM_PROVIDER(s) you actually use ---
+huggingface_hub>=0.34.0
+
+# --- optional, only needed for --voice mode ---
 SpeechRecognition>=3.10.0
 PyAudio>=0.2.14
 pyttsx3>=2.90
