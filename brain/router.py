@@ -17,6 +17,7 @@ from brain.cloud_provider import CerebrasProvider, GroqProvider, HuggingFaceProv
 from brain.provider_base import LLMProvider
 from system import collector as system_collector
 from system import resource_policy
+from system import system_agent
 
 _QUOTA_ADVICE = {
     "cerebras": "https://cloud.cerebras.ai (free tier resets daily)",
@@ -44,13 +45,15 @@ class ModelRouter:
         ordered = ([preferred] if preferred else []) + [p for p in fallback_order if p != preferred]
         chain = [p for p in ordered if self._providers[p].available() and p not in self._exhausted]
 
-        # Resource-aware adjustment (spec section 9). A single synchronous
-        # snapshot per call -- psutil reads are cheap (single-digit ms) and
-        # there's no background poller yet (that's Slice 3's event bus), so
-        # this is "ask right now," not "consult a cached state."
+        # Resource-aware adjustment (spec section 9). Prefers the System
+        # Agent's cached background poll (spec section 52: monitoring must
+        # not block the main loop) -- falls back to one direct synchronous
+        # snapshot only if that background agent isn't running yet (e.g.
+        # tests, or main.py hasn't started it), matching Slice 2's original
+        # behavior exactly in that case.
         if "local" in chain:
             try:
-                snap = system_collector.snapshot(probe_internet=True, cpu_interval=0.0)
+                snap = system_agent.latest_snapshot() or system_collector.snapshot(probe_internet=True, cpu_interval=0.0)
                 advice = resource_policy.advise(snap)
             except Exception:
                 advice = None  # never let a monitor failure break routing

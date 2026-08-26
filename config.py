@@ -52,6 +52,23 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "").strip()
 MIN_AVAILABLE_RAM_MB_FOR_LOCAL = int(os.getenv("MIN_AVAILABLE_RAM_MB_FOR_LOCAL", "2500"))
 MAX_CPU_PERCENT_FOR_LOCAL = float(os.getenv("MAX_CPU_PERCENT_FOR_LOCAL", "90"))
 
+# System Agent background polling + anomaly detection (spec sections 11,
+# 17, 51-52). Deliberately conservative polling: CPU/RAM is cheap enough to
+# check every few seconds, but the internet-reachability probe in
+# network_monitor.py touches the network, so it's throttled separately.
+SYSTEM_POLL_INTERVAL_SECONDS = float(os.getenv("SYSTEM_POLL_INTERVAL_SECONDS", "5"))
+SYSTEM_NETWORK_PROBE_EVERY_N_POLLS = int(os.getenv("SYSTEM_NETWORK_PROBE_EVERY_N_POLLS", "6"))  # ~every 30s at the default poll interval
+
+# Anomaly thresholds -- starting points (spec section 56: tune after
+# benchmarking on the real machine, don't overengineer ahead of that).
+ANOMALY_CPU_THRESHOLD_PERCENT = float(os.getenv("ANOMALY_CPU_THRESHOLD_PERCENT", "90"))
+ANOMALY_CPU_MIN_DURATION_SECONDS = float(os.getenv("ANOMALY_CPU_MIN_DURATION_SECONDS", "600"))  # 10 min, spec section 17's example
+ANOMALY_MEMORY_THRESHOLD_PERCENT = float(os.getenv("ANOMALY_MEMORY_THRESHOLD_PERCENT", "90"))
+ANOMALY_MEMORY_MIN_DURATION_SECONDS = float(os.getenv("ANOMALY_MEMORY_MIN_DURATION_SECONDS", "900"))  # 15 min, spec section 40's example
+ANOMALY_DISK_THRESHOLD_PERCENT = float(os.getenv("ANOMALY_DISK_THRESHOLD_PERCENT", "90"))
+ANOMALY_DISK_MIN_DURATION_SECONDS = float(os.getenv("ANOMALY_DISK_MIN_DURATION_SECONDS", "0"))  # low free space matters immediately, no duration gate
+ALERT_COOLDOWN_SECONDS = float(os.getenv("ALERT_COOLDOWN_SECONDS", "1800"))  # 30 min -- spec sections 19/41
+
 # Order in which providers are tried if the preferred one (LLM_PROVIDER) is
 # unavailable or exhausted. Any provider without credentials set is skipped
 # automatically -- you don't need to remove unused ones from this list.

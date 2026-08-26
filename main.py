@@ -18,6 +18,7 @@ from agent_state import AgentState
 from data_store import ActionIndex
 from embeddings import SemanticIndex
 from memory import UnifiedMemory
+from system import system_agent
 from tool_router import CapabilityRegistry, ToolRouter
 
 EXIT_WORDS = {"exit", "quit", "goodbye", "bye", "shutdown assistant", "stop listening"}
@@ -46,6 +47,31 @@ def get_input(use_voice):
 def _trace(label, payload):
     if DEBUG:
         print(f"[{label}] {payload}", flush=True)
+
+
+def _format_alert(event) -> str:
+    """Turns a raw AnomalyEvent into roughly the natural-language shape
+    spec section 18 shows. This is the deterministic fallback -- true
+    natural phrasing that reasons over *why* (spec section 38's "Chrome and
+    Python are using most of it") is Tier 3/LLM territory and needs the
+    conversational brain in the loop, which this background thread
+    shouldn't block on. This keeps alerts working even with every LLM
+    provider down (spec section 50's failover non-negotiable)."""
+    minutes = event.duration_seconds / 60.0
+    duration_txt = f"{minutes:.0f} minute{'s' if minutes >= 2 else ''}" if minutes >= 1 else f"{event.duration_seconds:.0f} seconds"
+    metric_txt = {
+        "cpu_usage_percent": "CPU usage",
+        "memory_percent": "memory usage",
+        "disk_used_percent": "disk usage",
+    }.get(event.metric, event.metric)
+    return f"Heads up -- {metric_txt} has been around {event.value:.0f}% for about {duration_txt}. Worth a look?"
+
+
+def _make_alert_handler(use_voice):
+    def _on_event(event):
+        print()  # separate the alert from whatever's mid-typed in the REPL
+        say(_format_alert(event), use_voice)
+    return _on_event
 
 
 def handle_command(user_text, index, use_voice, state: AgentState, memory: UnifiedMemory, router: ToolRouter,
@@ -153,6 +179,10 @@ def main():
     print(f"Loaded {len(index.entries)} language examples across {len(index.groups)} executable actions.")
     _trace("CAPABILITIES", registry.summary())
     _trace("SEMANTIC", "loading in background" if not semantic_index.ready else "ready")
+
+    agent = system_agent.start_default_agent(memory=memory, on_event=_make_alert_handler(use_voice))
+    _trace("SYSTEM_AGENT", f"started, polling every {agent.poll_interval}s")
+
     say(persona.greeting(), use_voice)
 
     while True:
@@ -161,6 +191,7 @@ def main():
             continue
         if text.lower() in EXIT_WORDS:
             say(persona.exit_line(), use_voice)
+            agent.stop()
             break
         try:
             handle_command(text, index, use_voice, state, memory, router, semantic_index)

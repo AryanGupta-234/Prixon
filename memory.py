@@ -35,6 +35,7 @@ EVENT_TYPES = {
     "app_opened", "app_closed", "website_opened",
     "goal_created", "goal_completed", "goal_abandoned",
     "preference_detected", "strategy_success", "strategy_failure",
+    "system_anomaly", "system_resolution",
 }
 
 
