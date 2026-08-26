@@ -8,18 +8,11 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import config
-
-_hf_client = None
-_working_hf_model = None
-_working_provider = None  # remembers the last provider that actually worked
-_exhausted_providers = set()  # providers confirmed quota-exhausted this session
-
-_ALL_PROVIDERS = ("cerebras", "groq", "huggingface")
+from brain.router import call_llm
 
 SYSTEM_PROMPT = r'''You are the reasoning and dialogue brain of a highly capable Windows personal assistant.
 
@@ -115,198 +108,6 @@ class NLUResult:
     raw: Dict[str, Any] = field(default_factory=dict)
 
 
-def _get_hf_client():
-    global _hf_client
-    if _hf_client is None:
-        if not config.HF_TOKEN:
-            raise RuntimeError("HF_TOKEN is not set.")
-        from huggingface_hub import InferenceClient
-        _hf_client = InferenceClient(api_key=config.HF_TOKEN, provider="auto")
-    return _hf_client
-
-
-def _classify_error(exc: Exception) -> str:
-    """
-    Distinguishes the failure modes that matter for deciding what to do
-    next -- retry the same thing, move on to the next model/provider, or
-    give up on this provider entirely for the rest of the session:
-      - "cold_start"     -> model is warming up, worth a short retry
-      - "unsupported"    -> this model isn't routable right now, skip it
-      - "quota"          -> free-tier credits/rate limit exhausted
-      - "auth"           -> bad/missing credentials, no point retrying
-      - "other"          -> unknown, surface it
-    """
-    msg = str(exc).lower()
-    if "503" in msg or "loading" in msg or "currently loading" in msg:
-        return "cold_start"
-    if "not supported" in msg or "model_not_supported" in msg or "does not exist" in msg or "404" in msg:
-        return "unsupported"
-    if any(kw in msg for kw in (
-        "429", "402", "rate limit", "rate_limit", "quota", "credit",
-        "insufficient", "exceeded", "payment required", "too many requests",
-    )):
-        return "quota"
-    if "401" in msg or "403" in msg or "unauthorized" in msg or "forbidden" in msg or ("invalid" in msg and "key" in msg) or ("invalid" in msg and "token" in msg):
-        return "auth"
-    return "other"
-
-
-def _call_openai_compatible(base_url: str, api_key: str, model: str, user_msg: str) -> str:
-    """
-    Cerebras and Groq both expose an OpenAI-compatible /chat/completions
-    endpoint, so one function covers either -- just point it at the right
-    base_url/key/model. Kept as a plain HTTP call (no extra SDK dependency)
-    since the shape is simple and identical across both providers.
-    """
-    import requests
-    resp = requests.post(
-        f"{base_url}/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            "max_tokens": config.LLM_MAX_TOKENS,
-            "temperature": config.LLM_TEMPERATURE,
-        },
-        timeout=30,
-    )
-    if resp.status_code >= 400:
-        raise RuntimeError(f"{resp.status_code}: {resp.text[:300]}")
-    data = resp.json()
-    return data["choices"][0]["message"]["content"] or ""
-
-
-def _call_cerebras_raw(user_msg: str) -> str:
-    if not config.CEREBRAS_API_KEY:
-        raise RuntimeError("CEREBRAS_API_KEY is not set.")
-    return _call_openai_compatible(config.CEREBRAS_BASE_URL, config.CEREBRAS_API_KEY, config.CEREBRAS_MODEL, user_msg)
-
-
-def _call_groq_raw(user_msg: str) -> str:
-    if not config.GROQ_API_KEY:
-        raise RuntimeError("GROQ_API_KEY is not set.")
-    return _call_openai_compatible(config.GROQ_BASE_URL, config.GROQ_API_KEY, config.GROQ_MODEL, user_msg)
-
-
-def _call_huggingface_raw(user_msg: str) -> str:
-    """
-    Unlike the single-shot providers above, Hugging Face's router can land
-    on different underlying models depending on what's currently hosted, so
-    this tries a short internal fallback list before giving up on HF as a
-    whole (see config.HF_MODEL_FALLBACKS).
-    """
-    global _working_hf_model
-    client = _get_hf_client()
-    models = ([config.HF_MODEL] if config.HF_MODEL else []) + [
-        m for m in config.HF_MODEL_FALLBACKS if m != config.HF_MODEL
-    ]
-    if _working_hf_model in models:
-        models.remove(_working_hf_model)
-        models.insert(0, _working_hf_model)
-
-    last_exc = None
-    for model in models:
-        for attempt in range(2):
-            try:
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_msg}],
-                    max_tokens=config.LLM_MAX_TOKENS, temperature=config.LLM_TEMPERATURE,
-                )
-                _working_hf_model = model
-                return response.choices[0].message.content or ""
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                kind = _classify_error(exc)
-                if kind == "cold_start":
-                    time.sleep(8)
-                    continue
-                if kind in ("unsupported", "quota"):
-                    break  # try the next model in HF's own list
-                raise
-    raise last_exc if last_exc else RuntimeError("No Hugging Face model available.")
-
-
-_PROVIDER_CALLERS = {
-    "cerebras": _call_cerebras_raw,
-    "groq": _call_groq_raw,
-    "huggingface": _call_huggingface_raw,
-}
-
-_PROVIDER_HAS_CREDENTIALS = {
-    "cerebras": lambda: bool(config.CEREBRAS_API_KEY),
-    "groq": lambda: bool(config.GROQ_API_KEY),
-    "huggingface": lambda: bool(config.HF_TOKEN),
-}
-
-_QUOTA_ADVICE = {
-    "cerebras": "https://cloud.cerebras.ai (free tier resets daily)",
-    "groq": "https://console.groq.com (free tier resets daily)",
-    "huggingface": "https://huggingface.co/settings/billing (free tier resets monthly, and it's a very small allowance)",
-}
-
-
-def _provider_chain() -> List[str]:
-    """
-    Preferred provider first (config.LLM_PROVIDER), then the rest of
-    config.PROVIDER_FALLBACK_ORDER, skipping anything without credentials
-    configured and anything already confirmed exhausted this session.
-    """
-    ordered = [config.LLM_PROVIDER] + [p for p in config.PROVIDER_FALLBACK_ORDER if p != config.LLM_PROVIDER]
-    return [p for p in ordered if p in _PROVIDER_CALLERS and _PROVIDER_HAS_CREDENTIALS[p]() and p not in _exhausted_providers]
-
-
-def _call_llm(user_msg: str) -> str:
-    global _working_provider
-
-    chain = _provider_chain()
-    if not chain:
-        if _exhausted_providers:
-            tried = ", ".join(sorted(_exhausted_providers))
-            raise RuntimeError(
-                f"Every configured provider ({tried}) is out of free quota for "
-                f"now. " + " / ".join(f"{p}: {_QUOTA_ADVICE[p]}" for p in sorted(_exhausted_providers))
-            )
-        raise RuntimeError(
-            "No LLM provider is configured. Set at least one of CEREBRAS_API_KEY, "
-            "GROQ_API_KEY, or HF_TOKEN in .env."
-        )
-
-    # Try the provider that last worked first, if it's still in the chain.
-    if _working_provider in chain:
-        chain.remove(_working_provider)
-        chain.insert(0, _working_provider)
-
-    last_exc = None
-    for provider in chain:
-        try:
-            result = _PROVIDER_CALLERS[provider](user_msg)
-            _working_provider = provider
-            return result
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            kind = _classify_error(exc)
-            if kind == "auth":
-                raise RuntimeError(
-                    f"{provider} rejected its credentials (check the matching "
-                    f"API key/token in .env)."
-                ) from exc
-            if kind == "quota":
-                _exhausted_providers.add(provider)
-            # cold_start/unsupported/other/quota: all fall through to try
-            # the next provider in the chain rather than failing outright.
-            continue
-
-    tried = ", ".join(chain)
-    raise RuntimeError(
-        f"None of the available providers ({tried}) could handle the request "
-        f"right now. Last error: {last_exc}"
-    ) from last_exc
-
-
 def _extract_json(text: str) -> Dict[str, Any]:
     text = (text or "").strip()
     text = re.sub(r"^```(?:json)?", "", text, flags=re.I).strip()
@@ -379,7 +180,7 @@ def resolve(user_text: str, candidates: List[Dict], assistant_name: Optional[str
         # (207-item) case this alone was worth ~28% of the payload.
         + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
     )
-    parsed = _extract_json(_call_llm(prompt))
+    parsed = _extract_json(call_llm(SYSTEM_PROMPT, prompt, max_tokens=config.LLM_MAX_TOKENS, temperature=config.LLM_TEMPERATURE))
 
     valid = {c.get("target") for c in candidates}
     target = parsed.get("match_target")

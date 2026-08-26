@@ -37,10 +37,18 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
+# Local inference via Ollama (spec section 5). OLLAMA_MODEL empty (the
+# default) means the local provider reports itself unavailable -- set it
+# once you've pulled a model (e.g. `ollama pull qwen2.5:7b-instruct`) to
+# start using it. Resource-aware local-vs-cloud choice is a later slice;
+# for now this just makes "local" a real, selectable chain member.
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "").strip()
+
 # Order in which providers are tried if the preferred one (LLM_PROVIDER) is
 # unavailable or exhausted. Any provider without credentials set is skipped
 # automatically -- you don't need to remove unused ones from this list.
-PROVIDER_FALLBACK_ORDER = ["cerebras", "groq", "huggingface"]
+PROVIDER_FALLBACK_ORDER = ["local", "cerebras", "groq", "huggingface"]
 
 # NOTE: os.getenv(name, default) only falls back when the var is entirely
 # unset -- an empty-but-present "ASSISTANT_DATA_PATH=" in .env (which is
