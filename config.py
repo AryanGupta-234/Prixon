@@ -45,6 +45,13 @@ GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "").strip()
 
+# Resource-aware routing thresholds (spec section 9). Starting points for a
+# 16GB-RAM laptop that also needs to keep running as a normal machine while
+# a local model is loaded -- not benchmarked numbers. Tune once real usage
+# data exists (spec section 55).
+MIN_AVAILABLE_RAM_MB_FOR_LOCAL = int(os.getenv("MIN_AVAILABLE_RAM_MB_FOR_LOCAL", "2500"))
+MAX_CPU_PERCENT_FOR_LOCAL = float(os.getenv("MAX_CPU_PERCENT_FOR_LOCAL", "90"))
+
 # Order in which providers are tried if the preferred one (LLM_PROVIDER) is
 # unavailable or exhausted. Any provider without credentials set is skipped
 # automatically -- you don't need to remove unused ones from this list.

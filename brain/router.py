@@ -1,15 +1,11 @@
-"""Provider chain + failover (spec sections 7-8, Slice 1 scope).
+"""Provider chain + failover (spec sections 7-8), now with resource-aware
+routing (spec section 9, Slice 2).
 
-This replaces nlu.py's old free-function _call_llm()/_provider_chain() with
-the exact same behavior over LLMProvider instances instead of functions:
-same "try last-working provider first," same per-session quota-exhaustion
-memory, same error messages main.py already knows how to display.
-
-Resource-aware routing (spec section 9 -- RAM/CPU/GPU/network state
-deciding local vs. cloud) is deliberately NOT here yet. This module only
-asks "is this provider available and does it still have quota this
-session?" -- Slice 2 adds a system-state check in front of this chain
-without needing to change chat()'s call signature.
+Same "try last-working provider first" and per-session quota-exhaustion
+memory as before. New in Slice 2: before returning the chain, this asks
+system.resource_policy whether current RAM/CPU/network state should exclude
+or prefer "local" -- the actual decision logic lives in resource_policy.py
+(kept pure/testable there); this just applies it to the chain.
 """
 from __future__ import annotations
 
@@ -19,6 +15,8 @@ import config
 from brain.local_provider import OllamaProvider
 from brain.cloud_provider import CerebrasProvider, GroqProvider, HuggingFaceProvider
 from brain.provider_base import LLMProvider
+from system import collector as system_collector
+from system import resource_policy
 
 _QUOTA_ADVICE = {
     "cerebras": "https://cloud.cerebras.ai (free tier resets daily)",
@@ -44,7 +42,27 @@ class ModelRouter:
         preferred = config.LLM_PROVIDER if config.LLM_PROVIDER in self._providers else None
         fallback_order = [p for p in config.PROVIDER_FALLBACK_ORDER if p in self._providers]
         ordered = ([preferred] if preferred else []) + [p for p in fallback_order if p != preferred]
-        return [p for p in ordered if self._providers[p].available() and p not in self._exhausted]
+        chain = [p for p in ordered if self._providers[p].available() and p not in self._exhausted]
+
+        # Resource-aware adjustment (spec section 9). A single synchronous
+        # snapshot per call -- psutil reads are cheap (single-digit ms) and
+        # there's no background poller yet (that's Slice 3's event bus), so
+        # this is "ask right now," not "consult a cached state."
+        if "local" in chain:
+            try:
+                snap = system_collector.snapshot(probe_internet=True, cpu_interval=0.0)
+                advice = resource_policy.advise(snap)
+            except Exception:
+                advice = None  # never let a monitor failure break routing
+
+            if advice is not None:
+                if advice.avoid_local:
+                    chain.remove("local")
+                elif advice.prefer_local and chain[0] != "local":
+                    chain.remove("local")
+                    chain.insert(0, "local")
+
+        return chain
 
     def call(self, system_prompt: str, user_message: str, *, max_tokens: int, temperature: float) -> str:
         chain = self._provider_chain()
