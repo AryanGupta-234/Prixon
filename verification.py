@@ -53,6 +53,32 @@ def verify_process_launch(executable: str, timeout: float = 2.0) -> Verification
     return VerificationResult(True, False, f"no process named '{target}' found within {timeout}s")
 
 
+def verify_process_closed(executable: str, timeout: float = 3.0) -> VerificationResult:
+    """Mirror of verify_process_launch: polls for the ABSENCE of a process
+    whose image name matches `executable`, for up to `timeout` seconds.
+    Closing can take a moment longer than opening (an app may have its own
+    unsaved-changes prompt or cleanup on exit), hence the slightly longer
+    default timeout than verify_process_launch's."""
+    if not _HAS_PSUTIL:
+        return VerificationResult(False, None, "psutil not installed -- closure not independently verified")
+
+    target = os.path.basename(executable).lower()
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        still_running = False
+        for proc in psutil.process_iter(["name"]):
+            try:
+                if (proc.info.get("name") or "").lower() == target:
+                    still_running = True
+                    break
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        if not still_running:
+            return VerificationResult(True, True, f"no process named '{target}' remains running")
+        time.sleep(0.2)
+    return VerificationResult(True, False, f"process '{target}' is still running after {timeout}s")
+
+
 def verify_uri_open() -> VerificationResult:
     """os.startfile() hands off to the shell and returns immediately with no
     handle to poll -- there is nothing to verify against, so this is

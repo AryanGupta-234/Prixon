@@ -72,6 +72,23 @@ class GpuState:
 
 
 @dataclass
+class ProcessInfo:
+    pid: int
+    name: str
+    cpu_percent: float
+    memory_mb: float
+
+
+@dataclass
+class ProcessesState:
+    # Only the heaviest few, not a full table -- spec section 11: "do not
+    # continuously store every process snapshot." top_by_cpu/top_by_memory
+    # can overlap (the same process may be heaviest on both).
+    top_by_cpu: List[ProcessInfo] = field(default_factory=list)
+    top_by_memory: List[ProcessInfo] = field(default_factory=list)
+
+
+@dataclass
 class SystemSnapshot:
     timestamp: float = field(default_factory=time.time)
     cpu: CpuState = field(default_factory=CpuState)
@@ -80,6 +97,7 @@ class SystemSnapshot:
     network: NetworkState = field(default_factory=NetworkState)
     battery: BatteryState = field(default_factory=BatteryState)
     gpu: GpuState = field(default_factory=GpuState)
+    processes: ProcessesState = field(default_factory=ProcessesState)
     # Per-monitor errors, kept out of band so a failed sensor doesn't fail
     # the whole snapshot -- see collector.py. Diagnostic use only (e.g.
     # `--debug`); not meant for the LLM prompt.
@@ -97,5 +115,9 @@ class SystemSnapshot:
             },
             "battery": vars(self.battery),
             "gpu": vars(self.gpu),
+            "processes": {
+                "top_by_cpu": [vars(p) for p in self.processes.top_by_cpu],
+                "top_by_memory": [vars(p) for p in self.processes.top_by_memory],
+            },
             "errors": self.errors,
         }

@@ -33,6 +33,7 @@ _ACTION_CATEGORY = {
     "open_mmc": "low_risk",
     "open_folder": "low_risk",
     "open_shell_folder": "low_risk",
+    "close_app": "state_changing",  # first real use of this category -- see the comment above
 }
 
 
@@ -109,6 +110,8 @@ class ToolRouter:
             v = verification.verify_process_launch(group.executable)
         elif action in {"open_app", "open_mmc", "open_folder", "open_shell_folder"} and group.executable:
             v = verification.verify_process_launch(group.executable)
+        elif action == "close_app" and group.executable:
+            v = verification.verify_process_closed(group.executable)
         elif action == "run_command" and group.target in config.SAFE_DIAGNOSTIC_TARGETS:
             v = verification.verify_diagnostic(exec_result.ok, exec_result.data)
         else:

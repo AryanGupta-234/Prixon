@@ -58,6 +58,72 @@ def launch_process(executable: str, args: str = "") -> ToolResult:
         return ToolResult(False, f"I couldn't launch that: {exc}")
 
 
+# Defense-in-depth beyond the dataset allow-list: even if a dataset row were
+# ever misconfigured to point at one of these, close_process refuses
+# outright rather than trusting the allow-list alone. Closing the wrong
+# process is far more consequential than launching the wrong one, so this
+# gets its own explicit guard rather than relying solely on "the dataset
+# would never contain this."
+_NEVER_CLOSE = {
+    "explorer.exe", "svchost.exe", "csrss.exe", "winlogon.exe", "wininit.exe",
+    "services.exe", "lsass.exe", "smss.exe", "dwm.exe", "system", "system idle process",
+    "python.exe", "python3.exe", "pythonw.exe",  # never let it close its own interpreter
+}
+
+
+def close_process(executable: str) -> ToolResult:
+    """Terminates all running processes whose image name matches
+    `executable` (case-insensitive). Tries a graceful terminate() first,
+    escalating to kill() only for processes still alive after a short
+    grace period -- an abrupt kill() risks unsaved user data, whereas
+    terminate() gives the app a chance to clean up first.
+
+    Like launch_process, this function itself will run with whatever name
+    it's given -- safety comes from the dataset only ever supplying a fixed,
+    reviewed executable name per allow-listed target (spec section 46: the
+    LLM never invents the process name, it only selects among existing
+    dataset targets). _NEVER_CLOSE above is the extra guard in case that
+    allow-list is ever wrong.
+    """
+    bad = _windows_only()
+    if bad:
+        return bad
+    try:
+        import psutil
+    except ImportError:
+        return ToolResult(False, "psutil is required to close applications and is not installed.")
+
+    target = (executable or "").strip().lower()
+    if not target or target in _NEVER_CLOSE:
+        return ToolResult(False, f"Closing '{executable}' is not permitted.")
+
+    matched = []
+    for proc in psutil.process_iter(["pid", "name"]):
+        try:
+            if (proc.info.get("name") or "").lower() == target:
+                matched.append(proc)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    if not matched:
+        return ToolResult(True, f"'{executable}' doesn't appear to be running.")
+
+    for proc in matched:
+        try:
+            proc.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    _, still_alive = psutil.wait_procs(matched, timeout=3)
+    for proc in still_alive:
+        try:
+            proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    return ToolResult(True, f"Closed {len(matched)} process(es) named '{executable}'.")
+
+
 def run_powershell(script: str) -> ToolResult:
     bad = _windows_only()
     if bad:
@@ -101,6 +167,7 @@ def diagnostic(name: str) -> ToolResult:
 TOOLS: Dict[str, ToolSpec] = {
     "open_uri": ToolSpec("open_uri", "Open an allow-listed Windows URI.", "low", open_uri),
     "launch_process": ToolSpec("launch_process", "Launch an allow-listed Windows application.", "low", launch_process),
+    "close_process": ToolSpec("close_process", "Close an allow-listed running application.", "medium", close_process),
     "diagnostic": ToolSpec("diagnostic", "Run a fixed, read-only Windows diagnostic.", "low", diagnostic),
 }
 

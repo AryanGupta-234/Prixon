@@ -33,12 +33,15 @@ class AnomalyEvent:
     confidence: float
     reason: str
     timestamp: float = field(default_factory=time.time)
+    top_process: Optional[str] = None
+    top_process_value: Optional[float] = None
 
     def to_dict(self) -> Dict:
         return {
             "metric": self.metric, "severity": self.severity, "value": self.value,
             "duration_seconds": round(self.duration_seconds, 1), "confidence": round(self.confidence, 2),
             "reason": self.reason, "timestamp": self.timestamp,
+            "top_process": self.top_process, "top_process_value": self.top_process_value,
         }
 
 
@@ -59,7 +62,7 @@ class AnomalyDetector:
         }
 
     def _check_metric(self, metric: str, value: Optional[float], threshold: float,
-                       min_duration: float, now: float) -> Optional[AnomalyEvent]:
+                       min_duration: float, now: float, top_process=None) -> Optional[AnomalyEvent]:
         watch = self._watches[metric]
         if value is None or value < threshold:
             watch.streak_start = None
@@ -94,8 +97,13 @@ class AnomalyDetector:
             return None  # already alerted at this severity -- spec section 19 alert-fatigue prevention
         watch.last_emitted_severity = severity
 
+        top_name = top_process.name if top_process else None
+        top_value = top_process.cpu_percent if (top_process and metric == "cpu_usage_percent") else (
+            top_process.memory_mb if (top_process and metric == "memory_percent") else None
+        )
         return AnomalyEvent(metric=metric, severity=severity, value=value, duration_seconds=duration,
-                             confidence=confidence, reason=reason)
+                             confidence=confidence, reason=reason,
+                             top_process=top_name, top_process_value=top_value)
 
     def check(self, snapshot: SystemSnapshot) -> list:
         """Returns a list of newly-crossed AnomalyEvents (usually empty).
@@ -104,17 +112,20 @@ class AnomalyDetector:
         now = snapshot.timestamp
         events = []
 
+        top_cpu_proc = snapshot.processes.top_by_cpu[0] if snapshot.processes.top_by_cpu else None
+        top_mem_proc = snapshot.processes.top_by_memory[0] if snapshot.processes.top_by_memory else None
+
         cpu = snapshot.cpu.usage_percent
         self.baseline.update("cpu_usage_percent", cpu)
         e = self._check_metric("cpu_usage_percent", cpu, config.ANOMALY_CPU_THRESHOLD_PERCENT,
-                                config.ANOMALY_CPU_MIN_DURATION_SECONDS, now)
+                                config.ANOMALY_CPU_MIN_DURATION_SECONDS, now, top_process=top_cpu_proc)
         if e:
             events.append(e)
 
         mem = snapshot.memory.percent
         self.baseline.update("memory_percent", mem)
         e = self._check_metric("memory_percent", mem, config.ANOMALY_MEMORY_THRESHOLD_PERCENT,
-                                config.ANOMALY_MEMORY_MIN_DURATION_SECONDS, now)
+                                config.ANOMALY_MEMORY_MIN_DURATION_SECONDS, now, top_process=top_mem_proc)
         if e:
             events.append(e)
 

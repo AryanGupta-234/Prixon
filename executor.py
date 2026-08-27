@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 import sys
 
 import config
-from tools import ToolResult, diagnostic, launch_process, open_uri
+from tools import ToolResult, close_process, diagnostic, launch_process, open_uri
 
 
 class ExecutionResult:
@@ -44,6 +44,18 @@ def _run_allowlisted(group, parameters: Optional[Dict[str, Any]] = None) -> Exec
         if not executable:
             return ExecutionResult(False, "That application target is not configured safely.")
         result = launch_process(executable, group.fixed_args)
+        return ExecutionResult(result.ok, result.message, result.data)
+
+    # close_app mirrors open_app's executable-parsing pattern exactly, just
+    # routed to close_process instead of launch_process. risk="medium" in
+    # the dataset for every close_app row means executor.needs_confirmation
+    # always gates this (spec section 46: closing something is more
+    # consequential than opening it, so it should always ask first).
+    if action == "close_app":
+        executable = group.executable
+        if not executable:
+            return ExecutionResult(False, "That application target is not configured safely.")
+        result = close_process(executable)
         return ExecutionResult(result.ok, result.message, result.data)
 
     # Dataset diagnostic actions are mapped to a fixed diagnostic identifier.

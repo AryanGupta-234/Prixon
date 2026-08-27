@@ -10,7 +10,7 @@ take down system awareness as a whole.
 """
 from __future__ import annotations
 
-from system import battery_monitor, cpu_monitor, disk_monitor, gpu_monitor, memory_monitor, network_monitor
+from system import battery_monitor, cpu_monitor, disk_monitor, gpu_monitor, memory_monitor, network_monitor, process_monitor
 from system.snapshot import SystemSnapshot
 
 
@@ -24,6 +24,7 @@ class SystemCollector:
             ("network", lambda: network_monitor.read(probe_internet=probe_internet)),
             ("battery", battery_monitor.read),
             ("gpu", gpu_monitor.read),
+            ("processes", process_monitor.read),
         ):
             try:
                 setattr(snap, field_name, fn())

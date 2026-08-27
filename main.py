@@ -69,7 +69,10 @@ def _format_alert(event) -> str:
         "memory_percent": "memory usage",
         "disk_used_percent": "disk usage",
     }.get(event.metric, event.metric)
-    return f"Heads up -- {metric_txt} has been around {event.value:.0f}% for about {duration_txt}. Worth a look?"
+    base = f"Heads up -- {metric_txt} has been around {event.value:.0f}% for about {duration_txt}."
+    if event.top_process:
+        base += f" {event.top_process} is using the most of it."
+    return base + " Worth a look?"
 
 
 def _make_alert_handler(use_voice):
