@@ -33,7 +33,7 @@ _ACTION_CATEGORY = {
     "open_mmc": "low_risk",
     "open_folder": "low_risk",
     "open_shell_folder": "low_risk",
-    "close_app": "state_changing",  # first real use of this category -- see the comment above
+    "close_app_dynamic": "state_changing",  # first real use of this category -- see the comment above
 }
 
 
@@ -110,8 +110,16 @@ class ToolRouter:
             v = verification.verify_process_launch(group.executable)
         elif action in {"open_app", "open_mmc", "open_folder", "open_shell_folder"} and group.executable:
             v = verification.verify_process_launch(group.executable)
-        elif action == "close_app" and group.executable:
-            v = verification.verify_process_closed(group.executable)
+        elif action == "close_app_dynamic":
+            # group.executable is empty for the dynamic target -- the real
+            # process name lives in parameters, set by main.py's
+            # pre-confirmation resolution (see the close_app_dynamic
+            # handling in main.py's handle_command).
+            resolved = (parameters or {}).get("resolved_process")
+            if resolved:
+                v = verification.verify_process_closed(resolved)
+            else:
+                v = verification.VerificationResult(False, None, "no resolved process name to verify against")
         elif action == "run_command" and group.target in config.SAFE_DIAGNOSTIC_TARGETS:
             v = verification.verify_diagnostic(exec_result.ok, exec_result.data)
         else:

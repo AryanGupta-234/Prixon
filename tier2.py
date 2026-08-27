@@ -104,3 +104,28 @@ def extract_entities(text: str) -> Dict[str, Any]:
             entities["direction"] = word
             break
     return entities
+
+
+_CLOSE_VERBS_RE = re.compile(r"\b(close|quit|exit|kill|terminate|shut\s*down|stop)\b\s+(.*)", re.I)
+_APP_NAME_FILLER_WORDS = {
+    "the", "my", "this", "that", "app", "application", "program", "process",
+    "please", "for", "me", "now", "right", "down", "up", "bro", "man", "pls", "plz", "u", "can",
+}
+
+
+def extract_app_name_hint(text: str) -> Optional[str]:
+    """Pulls a candidate app name out of a close/quit/exit-style request,
+    independent of which tier resolved the intent -- used only when the
+    matched action is close_app_dynamic (tools.close_running_app then
+    resolves this hint against whatever's ACTUALLY running, so a rough
+    extraction here is fine; it doesn't need to be exact, just close
+    enough for the fuzzy matching downstream). Strips the close-verb and
+    common filler words, keeps what's left. Returns None if nothing
+    meaningful remains (e.g. bare 'close' with no target)."""
+    m = _CLOSE_VERBS_RE.search(text)
+    if not m:
+        return None
+    remainder = m.group(2)
+    words = [w for w in re.findall(r"[a-z0-9]+", remainder.lower()) if w not in _APP_NAME_FILLER_WORDS]
+    hint = " ".join(words).strip()
+    return hint or None

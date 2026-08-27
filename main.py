@@ -15,6 +15,8 @@ import executor
 import goal_engine
 import persona
 import small_talk
+import tier2
+import tools
 import voice
 from agent_state import AgentState
 from brain.router import get_router
@@ -117,8 +119,29 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
     memory.record_event("task_started", intent=result.intent, target=result.match_target,
                          target_name=group.target_name, parameters=result.parameters)
 
+    # close_app_dynamic has no fixed executable in the dataset -- resolve
+    # WHICH real running process this refers to now, before any
+    # confirmation is shown, so (a) the user confirms the actual thing
+    # about to be closed instead of a vague echo of their own phrasing, and
+    # (b) if nothing matches, we say so plainly instead of asking the user
+    # to confirm closing something that isn't even running.
+    if (group.action or "").lower() == "close_app_dynamic":
+        hint = tier2.extract_app_name_hint(user_text) or group.target_name
+        resolved = tools.find_running_app(hint)
+        if not resolved:
+            say(f"I don't see anything matching '{hint}' currently running.", use_voice)
+            memory.record_event("task_failed", intent=result.intent, target=result.match_target,
+                                 target_name=group.target_name, success=False)
+            return
+        result.parameters = {**result.parameters, "resolved_process": resolved, "app_name_hint": hint}
+        result.reply = f"Found {resolved} running."
+
     if executor.needs_confirmation(group.risk):
-        say(f"{result.reply} {persona.confirm_prompt()}", use_voice)
+        if (group.action or "").lower() == "close_app_dynamic":
+            prompt = f"{result.reply} Close {result.parameters['resolved_process']}? {persona.confirm_prompt()}"
+        else:
+            prompt = f"{result.reply} {persona.confirm_prompt()}"
+        say(prompt, use_voice)
         confirmation = get_input(use_voice).lower().strip()
         if confirmation not in YES:
             say(persona.cancelled(), use_voice)

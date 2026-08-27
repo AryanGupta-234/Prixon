@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 import sys
 
 import config
-from tools import ToolResult, close_process, diagnostic, launch_process, open_uri
+from tools import ToolResult, close_process, close_running_app, diagnostic, launch_process, open_uri
 
 
 class ExecutionResult:
@@ -46,16 +46,22 @@ def _run_allowlisted(group, parameters: Optional[Dict[str, Any]] = None) -> Exec
         result = launch_process(executable, group.fixed_args)
         return ExecutionResult(result.ok, result.message, result.data)
 
-    # close_app mirrors open_app's executable-parsing pattern exactly, just
-    # routed to close_process instead of launch_process. risk="medium" in
-    # the dataset for every close_app row means executor.needs_confirmation
-    # always gates this (spec section 46: closing something is more
-    # consequential than opening it, so it should always ask first).
-    if action == "close_app":
-        executable = group.executable
-        if not executable:
-            return ExecutionResult(False, "That application target is not configured safely.")
-        result = close_process(executable)
+    # close_app_dynamic: the ONLY close-application action now -- there is
+    # no per-app dataset entry to look up an executable from. parameters
+    # carries whatever main.py already resolved against real running
+    # processes (tools.find_running_app) before the user was asked to
+    # confirm, so the thing being closed is guaranteed to be the same thing
+    # that was actually named in the confirmation prompt. Falls back to
+    # resolving from the raw hint itself only if parameters somehow didn't
+    # carry a pre-resolved name (e.g. a direct/test call into this
+    # function bypassing main.py's flow).
+    if action == "close_app_dynamic":
+        resolved = (parameters or {}).get("resolved_process")
+        if resolved:
+            result = close_process(resolved)
+        else:
+            hint = (parameters or {}).get("app_name_hint") or ""
+            result = close_running_app(hint)
         return ExecutionResult(result.ok, result.message, result.data)
 
     # Dataset diagnostic actions are mapped to a fixed diagnostic identifier.

@@ -79,11 +79,11 @@ def close_process(executable: str) -> ToolResult:
     terminate() gives the app a chance to clean up first.
 
     Like launch_process, this function itself will run with whatever name
-    it's given -- safety comes from the dataset only ever supplying a fixed,
-    reviewed executable name per allow-listed target (spec section 46: the
-    LLM never invents the process name, it only selects among existing
-    dataset targets). _NEVER_CLOSE above is the extra guard in case that
-    allow-list is ever wrong.
+    it's given -- safety comes from the caller only ever supplying a name
+    that ACTUALLY MATCHES A CURRENTLY RUNNING PROCESS (see
+    find_running_app below, which is close_running_app's dynamic resolver)
+    or a fixed, reviewed dataset value. _NEVER_CLOSE above is the extra
+    guard in case either of those is ever wrong.
     """
     bad = _windows_only()
     if bad:
@@ -122,6 +122,95 @@ def close_process(executable: str) -> ToolResult:
             continue
 
     return ToolResult(True, f"Closed {len(matched)} process(es) named '{executable}'.")
+
+
+# Purely a disambiguation aid for the small number of well-known apps whose
+# display name and process name differ noticeably (WhatsApp -> WhatsApp.exe
+# is obvious; "vs code" -> Code.exe is not). This is NOT an allow-list --
+# find_running_app below falls back to fuzzy-matching against WHATEVER is
+# actually running for anything not in here, so an app with no entry below
+# is still closeable as long as it's genuinely running right now. Extend
+# this only to improve match quality for ambiguous names, never to gate
+# which apps are permitted -- that job belongs to _NEVER_CLOSE and the
+# confirmation step, not this dictionary.
+_APP_NAME_HINTS = {
+    "whatsapp": "WhatsApp.exe", "chrome": "chrome.exe", "google chrome": "chrome.exe",
+    "edge": "msedge.exe", "microsoft edge": "msedge.exe", "spotify": "Spotify.exe",
+    "notepad": "notepad.exe", "vscode": "Code.exe", "vs code": "Code.exe",
+    "visual studio code": "Code.exe", "discord": "Discord.exe", "telegram": "Telegram.exe",
+    "word": "WINWORD.exe", "excel": "EXCEL.exe", "powerpoint": "POWERPNT.exe",
+    "outlook": "OUTLOOK.exe", "firefox": "firefox.exe", "steam": "Steam.exe",
+    "slack": "slack.exe", "zoom": "Zoom.exe",
+}
+
+
+def find_running_app(name_hint: str) -> Optional[str]:
+    """Resolves a spoken/typed app name to an ACTUALLY RUNNING process --
+    the actual 'dynamic, not hardcoded' mechanism. Tries the small
+    disambiguation dictionary above first (only to resolve short/ambiguous
+    hints faster when there's an exact-known mapping), then falls back to
+    fuzzy-matching the hint against every process genuinely running right
+    now, which is what lets this work for apps that were never registered
+    anywhere. Returns the real process name to pass to close_process(), or
+    None if nothing running matches.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return None
+
+    hint = (name_hint or "").strip().lower()
+    if not hint:
+        return None
+
+    running = set()
+    for proc in psutil.process_iter(["name"]):
+        try:
+            name = proc.info.get("name")
+            if name:
+                running.add(name)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    alias = _APP_NAME_HINTS.get(hint)
+    if alias:
+        for r in running:
+            if r.lower() == alias.lower():
+                return r  # only counts if that alias is ACTUALLY running -- never invent a match
+
+    def _base(name: str) -> str:
+        return name[:-4] if name.lower().endswith(".exe") else name
+
+    # Substring match either direction: "whatsapp" in "WhatsApp.exe", or a
+    # longer spoken phrase containing a shorter real process name.
+    for r in running:
+        base = _base(r).lower()
+        if hint in base or base in hint:
+            return r
+
+    # Last resort: tolerate typos/near-misses against real running names.
+    import difflib
+    bases = {_base(r).lower(): r for r in running}
+    close = difflib.get_close_matches(hint, list(bases.keys()), n=1, cutoff=0.75)
+    if close:
+        return bases[close[0]]
+
+    return None
+
+
+def close_running_app(name_hint: str) -> ToolResult:
+    """The actual dynamic close entry point: resolves name_hint against
+    whatever's really running (find_running_app), then closes it via the
+    same close_process used everywhere else -- same _NEVER_CLOSE guard,
+    same terminate-then-kill behavior. Reports 'not found' honestly rather
+    than guessing or closing something unrelated."""
+    bad = _windows_only()
+    if bad:
+        return bad
+    resolved = find_running_app(name_hint)
+    if not resolved:
+        return ToolResult(True, f"I don't see anything matching '{name_hint}' currently running.")
+    return close_process(resolved)
 
 
 def run_powershell(script: str) -> ToolResult:
