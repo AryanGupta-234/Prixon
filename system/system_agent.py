@@ -77,6 +77,7 @@ class SystemAgent(threading.Thread):
         self._latest: Optional[SystemSnapshot] = None
         self._poll_count = 0
         self.ready = False  # True once at least one snapshot has been taken
+        self._last_known_online: Optional[bool] = None  # carried across polls that skip the real probe
 
     def latest_snapshot(self) -> Optional[SystemSnapshot]:
         with self._lock:
@@ -98,6 +99,19 @@ class SystemAgent(threading.Thread):
     def _poll_once(self):
         probe_internet = (self._poll_count % config.SYSTEM_NETWORK_PROBE_EVERY_N_POLLS) == 0
         snap = system_collector.snapshot(probe_internet=probe_internet, cpu_interval=0.0)
+
+        # network_monitor.read() correctly reports online=None on polls that
+        # skip the actual reachability probe (spec section 11: don't guess).
+        # That's the right answer for a single read(), but for the AGENT's
+        # cached state it just means "still whatever it last confirmed" --
+        # without this, resource_policy/diagnostics would flicker between
+        # 'online' and 'unknown' every few seconds even on a perfectly
+        # stable connection, purely because most polls don't re-probe.
+        if snap.network.online is None and self._last_known_online is not None:
+            snap.network.online = self._last_known_online
+        elif snap.network.online is not None:
+            self._last_known_online = snap.network.online
+
         with self._lock:
             self._latest = snap
             self.ready = True

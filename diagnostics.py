@@ -51,6 +51,8 @@ def _check_embeddings(semantic_index) -> CheckResult:
         return CheckResult("Embeddings", "unavailable", "not initialized")
     if semantic_index.ready:
         return CheckResult("Embeddings", "ok", "ready")
+    if semantic_index.unavailable_reason:
+        return CheckResult("Embeddings", "unavailable", semantic_index.unavailable_reason)
     return CheckResult("Embeddings", "degraded", "still loading in background")
 
 
