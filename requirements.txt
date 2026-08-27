@@ -19,3 +19,14 @@ huggingface_hub>=0.34.0
 SpeechRecognition>=3.10.0
 PyAudio>=0.2.14
 pyttsx3>=2.90
+
+# --- optional, upgrades --voice mode's TTS to streaming neural speech ---
+# (spec sections 42-43). Also requires the ffmpeg BINARY on PATH separately
+# -- it's not pip-installable, so `pip install` alone won't give you this
+# path; voice.py detects its absence and falls back to pyttsx3 above
+# automatically, it just won't stream/sound as good until ffmpeg is
+# installed (e.g. `winget install ffmpeg` on Windows, or download a build
+# and add it to PATH).
+edge-tts>=6.1.0
+sounddevice>=0.4.6
+numpy>=1.26.0

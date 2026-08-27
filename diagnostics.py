@@ -97,9 +97,9 @@ def _check_network() -> CheckResult:
 
 def _check_voice() -> CheckResult:
     import voice
-    if voice.voice_available():
-        return CheckResult("Voice", "ok", "ready")
-    return CheckResult("Voice", "unavailable", "dependencies not installed")
+    if not voice.voice_available():
+        return CheckResult("Voice", "unavailable", "dependencies not installed")
+    return CheckResult("Voice", "ok", f"ready, TTS backend: {voice.tts_backend()}")
 
 
 def run(router, memory, semantic_index, registry) -> List[CheckResult]:

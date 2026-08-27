@@ -125,3 +125,13 @@ TTS_RATE = int(os.getenv("TTS_RATE", "185"))
 TTS_VOLUME = float(os.getenv("TTS_VOLUME", "1.0"))
 MIC_TIMEOUT_SECONDS = int(os.getenv("MIC_TIMEOUT_SECONDS", "6"))
 MIC_PHRASE_TIME_LIMIT = int(os.getenv("MIC_PHRASE_TIME_LIMIT", "8"))
+
+# Streaming neural TTS via edge-tts (spec section 42-43) -- tried before the
+# offline pyttsx3 engine above; see voice.py's module docstring for the
+# fallback order. Voice names are Microsoft neural voices (spec section 42
+# calls out Andrew/Ava/Brian by name); rate/pitch use edge-tts's own
+# percentage/Hz string format, not plain numbers.
+TTS_VOICE = os.getenv("TTS_VOICE", "en-US-AvaNeural")
+TTS_STREAM_RATE = os.getenv("TTS_STREAM_RATE", "+5%")
+TTS_STREAM_PITCH = os.getenv("TTS_STREAM_PITCH", "+0Hz")
+TTS_STREAM_SAMPLE_RATE = int(os.getenv("TTS_STREAM_SAMPLE_RATE", "24000"))
