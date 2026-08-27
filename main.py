@@ -1,6 +1,7 @@
 """Entry point for the LLM-first Windows assistant."""
 import argparse
 import sys
+import time
 
 try:
     sys.stdout.reconfigure(line_buffering=True)
@@ -9,12 +10,14 @@ except AttributeError:
 
 import config
 import context_engine
+import diagnostics
 import executor
 import goal_engine
 import persona
 import small_talk
 import voice
 from agent_state import AgentState
+from brain.router import get_router
 from data_store import ActionIndex
 from embeddings import SemanticIndex
 from memory import UnifiedMemory
@@ -23,7 +26,9 @@ from tool_router import CapabilityRegistry, ToolRouter
 
 EXIT_WORDS = {"exit", "quit", "goodbye", "bye", "shutdown assistant", "stop listening"}
 YES = {"yes", "y", "yeah", "yep", "sure", "go ahead", "do it", "proceed"}
+HEALTH_WORDS = {"health", "status", "diagnostics", "are you ok", "are you okay"}
 DEBUG = "--debug" in sys.argv
+config.DEBUG = DEBUG  # let brain/router.py (and anything else) trace without a circular import
 
 
 def say(text, use_voice):
@@ -162,6 +167,8 @@ def main():
     parser.add_argument("--voice", action="store_true")
     parser.add_argument("--debug", action="store_true",
                          help="Print tier routing / context / verification traces (section 29)")
+    parser.add_argument("--healthcheck", action="store_true",
+                         help="Run self-diagnostics (spec section 49) once and exit, without starting the REPL")
     args = parser.parse_args()
 
     use_voice = args.voice
@@ -183,6 +190,19 @@ def main():
     agent = system_agent.start_default_agent(memory=memory, on_event=_make_alert_handler(use_voice))
     _trace("SYSTEM_AGENT", f"started, polling every {agent.poll_interval}s")
 
+    if args.healthcheck:
+        # Give the agent a brief chance to complete its first poll so the
+        # report reflects real numbers rather than "no poll completed yet"
+        # purely due to startup timing -- capped short since this path is
+        # meant to be a quick one-shot check, not a wait for a full cycle.
+        deadline = time.time() + 2.0
+        while not agent.ready and time.time() < deadline:
+            time.sleep(0.1)
+        checks = diagnostics.run(get_router(), memory, semantic_index, registry)
+        print(diagnostics.format_report(checks))
+        agent.stop()
+        return
+
     say(persona.greeting(), use_voice)
 
     while True:
@@ -193,6 +213,10 @@ def main():
             say(persona.exit_line(), use_voice)
             agent.stop()
             break
+        if text.lower() in HEALTH_WORDS:
+            checks = diagnostics.run(get_router(), memory, semantic_index, registry)
+            print(diagnostics.format_report(checks))
+            continue
         try:
             handle_command(text, index, use_voice, state, memory, router, semantic_index)
         except RuntimeError as exc:

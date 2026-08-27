@@ -51,6 +51,7 @@ class ModelRouter:
         # snapshot only if that background agent isn't running yet (e.g.
         # tests, or main.py hasn't started it), matching Slice 2's original
         # behavior exactly in that case.
+        advice = None
         if "local" in chain:
             try:
                 snap = system_agent.latest_snapshot() or system_collector.snapshot(probe_internet=True, cpu_interval=0.0)
@@ -64,6 +65,9 @@ class ModelRouter:
                 elif advice.prefer_local and chain[0] != "local":
                     chain.remove("local")
                     chain.insert(0, "local")
+
+        if config.DEBUG:
+            print(f"[MODEL_ROUTER] chain={chain} advice={advice.reason if advice else 'n/a (local not in chain)'}", flush=True)
 
         return chain
 
@@ -91,10 +95,14 @@ class ModelRouter:
             try:
                 result = provider.chat(system_prompt, user_message, max_tokens=max_tokens, temperature=temperature)
                 self._working_provider = name
+                if config.DEBUG:
+                    print(f"[MODEL_ROUTER] used provider={name}", flush=True)
                 return result
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 kind = provider.classify_error(exc)
+                if config.DEBUG:
+                    print(f"[MODEL_ROUTER] provider={name} failed kind={kind} error={exc}", flush=True)
                 if kind == "auth":
                     raise RuntimeError(
                         f"{name} rejected its credentials (check the matching API key/token in .env)."

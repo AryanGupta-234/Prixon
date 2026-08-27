@@ -10,6 +10,11 @@ except ImportError:
     pass
 
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Jarvis")
+
+# Set by main.py from --debug at startup. Modules like brain/router.py read
+# this rather than parsing sys.argv themselves or importing main.py (which
+# would be circular) -- one flag, set once, read everywhere.
+DEBUG = False
 WAKE_WORD = os.getenv("WAKE_WORD", "").strip().lower()
 
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "cerebras").strip().lower()
