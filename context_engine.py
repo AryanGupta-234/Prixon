@@ -107,33 +107,38 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
           broad_search: bool = False, semantic_index=None, patterns=None) -> RoutedResult:
     state.begin_turn()
 
-    # Environment status is answered from live state before semantic retrieval.
+    # First use live environment perception when the user explicitly names an
+    # entity and asks for its current runtime state. This is dynamic: the
+    # entity is discovered from the user's language and current processes.
     live = _live_app_status(user_text, state)
     if live is not None:
         return live
 
     candidates = goal_engine.bias_candidates(candidates, state.active_goal, groups)
 
-    # Explicit conversational references must beat semantic similarity.
+    # Explicit conversational references beat semantic similarity, but only
+    # resolve the linguistic reference. The capability itself remains a
+    # normal catalog/semantic decision. This prevents reference handling from
+    # becoming a hidden application command table.
     tier1 = reference_resolver.resolve(user_text, state)
-    if tier1.resolved:
-        target = tier1.target
-        if not target and tier1.action_hint:
-            group = _group_for_action(groups, tier1.action_hint)
-            if group:
-                target = group.target
-        if target:
-            params = {}
-            if tier1.target_name:
-                params["app_name_hint"] = tier1.target_name
-            return RoutedResult(
-                NLUResult(match_target=target, confidence="high", reply="On it.", intent=tier1.intent or "unknown",
-                           parameters=params, reference=tier1.reference, raw={"tier1_reason": tier1.reason}),
-                "tier1", {"reference": tier1.reference, "confidence": tier1.confidence, "reason": tier1.reason})
+    tier1_augmented_query = user_text
+    if tier1.resolved and tier1.target:
+        params = {}
+        if tier1.target_name:
+            params["entity_name"] = tier1.target_name
+            params["app_name_hint"] = tier1.target_name
+        return RoutedResult(
+            NLUResult(match_target=tier1.target, confidence="high", reply="On it.", intent=tier1.intent or "unknown",
+                       parameters=params, reference=tier1.reference, raw={"tier1_reason": tier1.reason}),
+            "tier1", {"reference": tier1.reference, "confidence": tier1.confidence, "reason": tier1.reason})
+    elif tier1.resolved and tier1.target_name:
+        # The reference is known, but the requested operation is new. Feed the
+        # concrete entity into semantic retrieval without inventing a target.
+        tier1_augmented_query = f"{user_text} {tier1.target_name}"
 
     semantic_ready = bool(semantic_index is not None and semantic_index.ready)
     top_k = max(config.TOP_K_CANDIDATES, 1)
-    expanded_query = concepts.expand_query(user_text)
+    expanded_query = concepts.expand_query(tier1_augmented_query)
     semantic_candidates = semantic_index.search(expanded_query, top_k=top_k) if semantic_ready else []
     if semantic_candidates:
         candidates = []
@@ -158,10 +163,19 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
             "warmup", {"reason": "semantic index still loading, no candidates available"},
         )
 
-    memory.conversation.slots["live_agent_context"] = _compact_agent_context(state, memory, patterns, user_text)
-    result = llm_resolve(user_text, candidates, assistant_name, broad_search, memory.conversation)
+    memory.conversation.slots["live_agent_context"] = _compact_agent_context(state, memory, patterns, tier1_augmented_query)
+    result = llm_resolve(tier1_augmented_query, candidates, assistant_name, broad_search, memory.conversation)
+    if tier1.resolved and tier1.target_name:
+        result.parameters = {**result.parameters, "app_name_hint": tier1.target_name, "entity_name": tier1.target_name}
+        if not result.reference or result.reference == "none":
+            result.reference = tier1.reference
     return RoutedResult(result, "tier3-qwen-semantic", {
         "semantic_candidates": semantic_candidates[:5],
         "semantic_ready": semantic_ready,
+        "reference_resolution": {
+            "resolved": tier1.resolved,
+            "entity": tier1.target_name,
+            "reason": tier1.reason,
+        },
         "raw": result.raw,
     })
