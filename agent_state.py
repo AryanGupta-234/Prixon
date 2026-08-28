@@ -1,4 +1,4 @@
-"""Canonical agent state for active tasks, references, and computer context."""
+"""Canonical agent state for active tasks, references, world context and learned experience."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -11,15 +11,12 @@ class AgentState:
     last_target: Optional[str] = None
     last_target_name: Optional[str] = None
     last_intent: Optional[str] = None
-
-    # Concrete entity currently most likely to be referred to by "it/that".
-    # This is deliberately separate from last_target because a diagnostic
-    # action is not necessarily the entity the user is talking about.
     last_referenced_app: Optional[str] = None
     last_referenced_app_hint: Optional[str] = None
 
     open_apps: List[str] = field(default_factory=list)
     computer_state: Dict[str, Any] = field(default_factory=dict)
+    learned_context: Dict[str, Any] = field(default_factory=dict)
     execution_state: str = "idle"
 
     def note_successful_task(self, target: str, target_name: str, intent: str,
@@ -36,16 +33,12 @@ class AgentState:
         if is_close:
             victim = (resolved_name or target_name or "").lower()
             self.open_apps = [a for a in self.open_apps if a.lower() != victim]
-            # Do not leave a closed process as the referent for the next turn.
             if self.last_referenced_app and self.last_referenced_app.lower() == victim:
                 self.last_referenced_app = None
                 self.last_referenced_app_hint = None
         elif concrete:
             if concrete not in self.open_apps:
                 self.open_apps.append(concrete)
-            # Successful app/entity actions establish a strong conversational
-            # referent, so "open Spotify" followed by "close it" works even
-            # without a separate diagnostic turn.
             self.last_referenced_app = concrete
             self.last_referenced_app_hint = concrete
 
@@ -63,4 +56,6 @@ class AgentState:
             "last_referenced_app_hint": self.last_referenced_app_hint,
             "open_apps": list(self.open_apps),
             "computer_state": self.computer_state,
+            "learned_context": self.learned_context,
+            "execution_state": self.execution_state,
         }
