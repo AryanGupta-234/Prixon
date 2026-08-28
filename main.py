@@ -113,10 +113,18 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
         say(chit.reply, use_voice)
         return
 
-    candidates = index.search(user_text)
-    broad = not candidates or candidates[0]["score"] < config.MIN_TFIDF_SCORE
-    if broad:
-        candidates = index.full_catalog()
+    # NOTE: index.search() is a retired TF-IDF shim that always returns [].
+    # It used to gate a fallback to index.full_catalog() (all 208 actions)
+    # whenever the top score was low -- since the shim always returns [],
+    # that fallback previously fired on EVERY request, dumping the entire
+    # ~21k-character catalog into the Qwen prompt regardless of whether
+    # semantic retrieval (FastEmbed) already had a good narrow answer. On a
+    # CPU-only box with no num_ctx set, that alone was enough to blow past
+    # the 60s Ollama timeout. Semantic retrieval (context_engine.route) is
+    # now the sole source of candidates; we no longer seed with the full
+    # catalog here.
+    candidates = []
+    broad = False
     if not DEBUG:
         print("(thinking...)", flush=True)
     routed = context_engine.route(user_text, candidates, state, memory, index.groups, config.ASSISTANT_NAME, broad,

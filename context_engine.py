@@ -116,7 +116,8 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
     # Embeddings are retrieval only. They narrow the capability space, but
     # NEVER execute a command by similarity alone. Qwen remains the semantic
     # arbiter and sees the live situation model plus this shortlist.
-    semantic_candidates = semantic_index.search(user_text, top_k=max(config.TOP_K_CANDIDATES, 12)) if semantic_index is not None and semantic_index.ready else []
+    semantic_ready = bool(semantic_index is not None and semantic_index.ready)
+    semantic_candidates = semantic_index.search(user_text, top_k=max(config.TOP_K_CANDIDATES, 12)) if semantic_ready else []
     if semantic_candidates:
         candidates = []
         for item in semantic_candidates[:max(config.TOP_K_CANDIDATES, 12)]:
@@ -126,11 +127,32 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
     elif config.LEGACY_LEXICAL_FALLBACK:
         # Kept only for temporary A/B regression testing. Normal mode is off.
         candidates = candidates
+    else:
+        candidates = []
+
+    # Safety net: never let a caller-supplied candidate list (e.g. a future
+    # full_catalog() use, or LEGACY_LEXICAL_FALLBACK) balloon the Qwen prompt.
+    # This is what actually caused the 60s Ollama timeouts -- see main.py.
+    if len(candidates) > max(config.TOP_K_CANDIDATES, 12):
+        candidates = candidates[:max(config.TOP_K_CANDIDATES, 12)]
+
+    if not semantic_ready and semantic_index is not None and semantic_index.loading and not candidates:
+        # Embeddings are still warming up in the background and we have no
+        # other way to narrow 208 actions down. Calling Qwen with an empty
+        # allow-list can't succeed anyway -- say so instead of burning a
+        # multi-second CPU round trip for nothing.
+        return RoutedResult(
+            NLUResult(match_target=None, confidence="none",
+                      reply="Still finishing startup -- give me a few seconds and try again.",
+                      intent="startup_warmup", parameters={}, reference="none",
+                      raw={"semantic_loading": True}),
+            "warmup", {"reason": "semantic index still loading, no candidates available"},
+        )
 
     memory.conversation.slots["live_agent_context"] = _compact_agent_context(state, memory, patterns)
     result = llm_resolve(user_text, candidates, assistant_name, broad_search, memory.conversation)
     return RoutedResult(result, "tier3-qwen-semantic", {
         "semantic_candidates": semantic_candidates[:5],
-        "semantic_ready": bool(semantic_index is not None and semantic_index.ready),
+        "semantic_ready": semantic_ready,
         "raw": result.raw,
     })

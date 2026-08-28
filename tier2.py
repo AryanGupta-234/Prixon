@@ -67,14 +67,31 @@ def extract_entities(text: str) -> Dict[str, Any]:
 
 _CLOSE_VERBS_RE = re.compile(r"\b(close|quit|exit|kill|terminate|shut\s*down|stop)\b\s+(.*)", re.I)
 _RUNNING_RE = re.compile(
-    r"\b(?:is|are|does)\s+(?P<app>.+?)\s+(?:currently\s+)?(?:running|open|active)\b|"
-    r"\b(?:check|chk|see|tell\s+me)\s+(?:if|whether)\s+(?P<app2>.+?)\s+(?:is|are)\s+(?:currently\s+)?(?:running|open|active)\b|"
+    r"\b(?:is|are|does)\s+(?P<app>.+?)\s+(?:still\s+|currently\s+)?(?:running|open|active)\b|"
+    # "check/chk/see/tell me if/whether X is/are running" AND the shorter
+    # "check/chk if X running" (no is/are) that natural typing drops.
+    r"\b(?:check|chk|see|tell\s+me)\s+(?:if|whether)\s+(?P<app2>.+?)\s+(?:(?:is|are)\s+)?(?:still\s+|currently\s+)?(?:running|open|active)\b|"
     r"\b(?:check|chk|see|tell\s+me)\s+(?:for)\s+(?P<app3>.+?)\s+(?:running|open|active)\b",
     re.I,
 )
+# Bare "spotify running?" / "spotify open?" -- deliberately a SEPARATE,
+# stricter pass rather than folded into _RUNNING_RE. An earlier version
+# anchored this at ^ inside the same alternation, but because Python tries
+# alternatives left-to-right at each start position, the permissive bare
+# branch matched at position 0 before the verb-anchored branches got a
+# chance to match later in the string -- e.g. "can u chk if spotify running"
+# wrongly captured "chk if spotify" as the app name instead of matching the
+# check/chk branch on "spotify". Trying this only after _RUNNING_RE fails,
+# and only against short question-like text, avoids that.
+_BARE_RUNNING_RE = re.compile(r"^(?P<app>[a-z0-9 ]+?)\s+(?:still\s+|currently\s+)?(?:running|open|active)\s*\??$", re.I)
+_BARE_STOPWORDS = {
+    "if", "whether", "chk", "check", "see", "tell", "does", "is", "are", "can", "could",
+    "would", "please", "u", "you", "your", "the", "my", "this", "that",
+}
 _APP_NAME_FILLER_WORDS = {
     "the", "my", "this", "that", "app", "application", "program", "process", "processes",
     "please", "for", "me", "now", "right", "down", "up", "bro", "man", "pls", "plz", "u", "can",
+    "still", "currently", "also",
 }
 
 def extract_app_name_hint(text: str) -> Optional[str]:
@@ -84,10 +101,20 @@ def extract_app_name_hint(text: str) -> Optional[str]:
     return _clean_app_hint(m.group(2))
 
 def extract_running_app_hint(text: str) -> Optional[str]:
-    m = _RUNNING_RE.search(text)
-    if not m:
-        return None
-    return _clean_app_hint(m.group("app") or m.group("app2") or m.group("app3"))
+    stripped = text.strip()
+    m = _RUNNING_RE.search(stripped)
+    if m:
+        return _clean_app_hint(m.group("app") or m.group("app2") or m.group("app3"))
+    m = _BARE_RUNNING_RE.match(stripped)
+    if m:
+        words = m.group("app").lower().split()
+        # A genuine bare app-status query is short and has no leftover verb
+        # words -- if any showed up, the sentence needed the verb-anchored
+        # patterns above and just didn't match one of their forms; don't
+        # guess by swallowing the whole sentence as an "app name".
+        if 1 <= len(words) <= 4 and not (set(words) & _BARE_STOPWORDS):
+            return _clean_app_hint(m.group("app"))
+    return None
 
 def _clean_app_hint(value: str) -> Optional[str]:
     words = [w for w in re.findall(r"[a-z0-9]+", value.lower()) if w not in _APP_NAME_FILLER_WORDS]

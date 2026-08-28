@@ -26,6 +26,11 @@ LLM_PROVIDER = "ollama" if LOCAL_ONLY_MODE else os.getenv("LLM_PROVIDER", "ollam
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip()
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct").strip()
 OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60"))
+# Explicit context window for Ollama requests. qwen2.5:7b-instruct supports
+# up to 32k, but larger num_ctx costs more prompt-processing time on CPU, so
+# this stays modest. Setting it explicitly (rather than relying on Ollama's
+# own default) makes truncation/slowness behavior predictable and debuggable.
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "4096"))
 
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 HF_MODEL = os.getenv("HF_MODEL", "").strip()

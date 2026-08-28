@@ -28,12 +28,27 @@ class OllamaProvider(LLMProvider):
         return self._checked_available
     def chat(self,system_prompt:str,user_message:str,*,max_tokens:int,temperature:float)->str:
         import requests
-        payload={"model":self.model,"messages":[{"role":"system","content":system_prompt},{"role":"user","content":user_message}],"stream":False,"keep_alive":"10m","options":{"temperature":temperature,"num_predict":max_tokens}}
+        num_ctx=getattr(config,"OLLAMA_NUM_CTX",4096)
+        payload={"model":self.model,"messages":[{"role":"system","content":system_prompt},{"role":"user","content":user_message}],"stream":False,"keep_alive":"10m","options":{"temperature":temperature,"num_predict":max_tokens,"num_ctx":num_ctx}}
         # NLU prompts are JSON-constrained by their caller; asking Ollama for
         # JSON reduces markdown/explanation leakage without changing general chat.
         if "OUTPUT ONLY JSON" in system_prompt:
             payload["format"]="json"
-        r=requests.post(f"{self.base_url}/api/chat",json=payload,timeout=config.OLLAMA_TIMEOUT_SECONDS)
+        prompt_chars=len(system_prompt)+len(user_message)
+        est_input_tokens=prompt_chars//4  # rough chars/4 heuristic, no tokenizer available here
+        request_start=time.time()
+        if config.DEBUG:
+            print(f"[OLLAMA] model={self.model} prompt_chars={prompt_chars} "
+                  f"estimated_input_tokens={est_input_tokens} max_output_tokens={max_tokens} "
+                  f"num_ctx={num_ctx} request_start={request_start:.3f}", flush=True)
+            if est_input_tokens > num_ctx * 0.8:
+                print(f"[OLLAMA] WARNING estimated_input_tokens={est_input_tokens} is close to or over "
+                      f"num_ctx={num_ctx} -- prompt will be slow to process and/or silently truncated", flush=True)
+        try:
+            r=requests.post(f"{self.base_url}/api/chat",json=payload,timeout=config.OLLAMA_TIMEOUT_SECONDS)
+        finally:
+            if config.DEBUG:
+                print(f"[OLLAMA] response_time={time.time()-request_start:.3f}s", flush=True)
         if r.status_code>=400: raise RuntimeError(f"{r.status_code}: {r.text[:500]}")
         text=((r.json().get("message") or {}).get("content") or "").strip()
         if not text: raise RuntimeError("Ollama returned an empty model response")

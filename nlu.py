@@ -172,6 +172,13 @@ def resolve(user_text: str, candidates: List[Dict], assistant_name: Optional[str
         "Select at most ONE allow-listed target. Extract useful parameters, but never invent a capability.\n\n"
         + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
     )
+    if config.DEBUG:
+        conversation_chars = len(json.dumps(context["conversation"], ensure_ascii=False))
+        capability_chars = len(json.dumps(context["allow_list"], ensure_ascii=False))
+        system_state_chars = len(json.dumps(context["conversation"].get("active_slots", {}).get("live_agent_context", {}), ensure_ascii=False))
+        print(f"[CONTEXT] conversation_chars={conversation_chars} capability_chars={capability_chars} "
+              f"system_state_chars={system_state_chars} candidate_count={len(candidates)} "
+              f"total_prompt_chars={len(prompt)}", flush=True)
     parsed = _extract_json(call_llm(SYSTEM_PROMPT, prompt, max_tokens=config.LLM_MAX_TOKENS, temperature=config.LLM_TEMPERATURE))
 
     valid = {c.get("target") for c in candidates}
