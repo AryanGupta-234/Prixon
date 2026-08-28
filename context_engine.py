@@ -1,7 +1,6 @@
 """Context engine: references -> live environment -> semantic shortlist -> Qwen."""
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -35,12 +34,7 @@ def _group_for_action(groups: Dict[str, ActionGroup], action: str):
 
 
 def _snapshot_context(snapshot) -> Dict[str, Any]:
-    """Only the fields Qwen actually reasons about. Previously this always
-    included the full GPU block (even when there's no GPU, i.e. most of the
-    time) and 3+3 top-process lists on every single call. Zero-value/absent
-    blocks are now omitted entirely rather than shipped as empty structure --
-    that structure costs real prompt-eval tokens for information that isn't
-    there."""
+    """Return only compact, model-facing live state."""
     if snapshot is None:
         return {"available": False}
     out: Dict[str, Any] = {
@@ -55,11 +49,6 @@ def _snapshot_context(snapshot) -> Dict[str, Any]:
         out["battery_charging"] = snapshot.battery.charging
     if snapshot.gpu.available:
         out["gpu_percent"] = snapshot.gpu.utilization_percent
-    # Top processes are only relevant to "what's using my X" style
-    # questions, which are answered by the environment-first path (Section
-    # 9) before Qwen is ever called -- so Qwen itself rarely needs this.
-    # Keep exactly one entry as a lightweight situational cue rather than
-    # dropping it completely, instead of the previous 3+3.
     if snapshot.processes.top_by_cpu:
         top = snapshot.processes.top_by_cpu[0]
         out["top_cpu_process"] = {"name": top.name, "cpu_percent": top.cpu_percent}
@@ -69,17 +58,17 @@ def _snapshot_context(snapshot) -> Dict[str, Any]:
 def _compact_agent_context(state: AgentState, memory: UnifiedMemory, patterns=None, user_text: str = "") -> Dict[str, Any]:
     snapshot = system_agent.latest_snapshot()
     state.computer_state = _snapshot_context(snapshot)
-    # Only the single most recent episode, and only when it exists -- Qwen
-    # needs "what just happened", not a rolling log; CONTEXT_TURNS already
-    # covers multi-turn conversational continuity separately.
     recent_episodes = memory.episodes[-1:]
     learned = patterns.context() if patterns is not None else {}
     out: Dict[str, Any] = {"world_state": state.computer_state}
     if state.active_goal:
         out["active_goal"] = state.active_goal
-    if state.last_referenced_app:
-        out["last_referenced_app"] = state.last_referenced_app
+    if state.last_entity_name:
+        out["active_entity"] = state.last_entity_name
+        out["entity_process"] = state.last_entity_process
         out["reference_age_turns"] = state.snapshot().get("reference_age_turns")
+    if state.last_operation:
+        out["active_operation"] = state.last_operation
     if state.open_apps:
         out["tracked_apps"] = state.open_apps[-6:]
     if recent_episodes:
@@ -103,7 +92,7 @@ def _live_app_status(user_text: str, state: AgentState) -> Optional[RoutedResult
     if not hint:
         return None
     process = tools.find_running_app(hint)
-    state.note_referenced_app(process or hint, hint)
+    state.note_referenced_app(process or hint, hint, operation="application_status")
     params = {"app_name_hint": hint, "resolved_process": process, "running": bool(process)}
     reply = f"Yes — {hint} is running." if process else f"No — I don't see {hint} running right now."
     return RoutedResult(
@@ -118,14 +107,14 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
           broad_search: bool = False, semantic_index=None, patterns=None) -> RoutedResult:
     state.begin_turn()
 
-    # Live environment queries are resolved before any action retrieval.
+    # Environment status is answered from live state before semantic retrieval.
     live = _live_app_status(user_text, state)
     if live is not None:
         return live
 
     candidates = goal_engine.bias_candidates(candidates, state.active_goal, groups)
 
-    # Explicit references are deterministic and should win over semantic similarity.
+    # Explicit conversational references must beat semantic similarity.
     tier1 = reference_resolver.resolve(user_text, state)
     if tier1.resolved:
         target = tier1.target
@@ -134,23 +123,14 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
             if group:
                 target = group.target
         if target:
+            params = {}
+            if tier1.target_name:
+                params["app_name_hint"] = tier1.target_name
             return RoutedResult(
                 NLUResult(match_target=target, confidence="high", reply="On it.", intent=tier1.intent or "unknown",
-                           parameters={"app_name_hint": tier1.target_name} if tier1.action_hint == "close_app_dynamic" else {},
-                           reference=tier1.reference, raw={"tier1_reason": tier1.reason}),
+                           parameters=params, reference=tier1.reference, raw={"tier1_reason": tier1.reason}),
                 "tier1", {"reference": tier1.reference, "confidence": tier1.confidence, "reason": tier1.reason})
 
-    # Embeddings are retrieval only. They narrow the capability space, but
-    # NEVER execute a command by similarity alone. Qwen remains the semantic
-    # arbiter and sees the live situation model plus this shortlist.
-    #
-    # NOTE: this used to read `max(config.TOP_K_CANDIDATES, 12)`, which meant
-    # tuning TOP_K_CANDIDATES down to 6 (see config.py) was a silent no-op --
-    # the floor of 12 always won. On real hardware this was worth ~350-400
-    # extra prompt tokens (2 examples x 6 extra candidates), which measurably
-    # matters on this CPU's ~46-55 tok/s prompt-eval speed. Use the tuned
-    # value directly; the query-expansion in concepts.py compensates for any
-    # recall lost from a smaller shortlist.
     semantic_ready = bool(semantic_index is not None and semantic_index.ready)
     top_k = max(config.TOP_K_CANDIDATES, 1)
     expanded_query = concepts.expand_query(user_text)
@@ -162,25 +142,17 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
             if group:
                 candidates.append(group.to_candidate(item.get("score", 0.0)))
     elif config.LEGACY_LEXICAL_FALLBACK:
-        # Kept only for temporary A/B regression testing. Normal mode is off.
         candidates = candidates
     else:
         candidates = []
 
-    # Safety net: never let a caller-supplied candidate list (e.g. a future
-    # full_catalog() use, or LEGACY_LEXICAL_FALLBACK) balloon the Qwen prompt.
-    # This is what actually caused the 60s Ollama timeouts -- see main.py.
     if len(candidates) > top_k:
         candidates = candidates[:top_k]
 
     if not semantic_ready and semantic_index is not None and semantic_index.loading and not candidates:
-        # Embeddings are still warming up in the background and we have no
-        # other way to narrow 208 actions down. Calling Qwen with an empty
-        # allow-list can't succeed anyway -- say so instead of burning a
-        # multi-second CPU round trip for nothing.
         return RoutedResult(
             NLUResult(match_target=None, confidence="none",
-                      reply="Still finishing startup -- give me a few seconds and try again.",
+                      reply="Still finishing startup — give me a few seconds and try again.",
                       intent="startup_warmup", parameters={}, reference="none",
                       raw={"semantic_loading": True}),
             "warmup", {"reason": "semantic index still loading, no candidates available"},
