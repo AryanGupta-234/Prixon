@@ -1,4 +1,4 @@
-"""Provider chain + failover with resource-aware local/cloud routing."""
+"""Provider routing with a deliberately local-only test mode."""
 from __future__ import annotations
 
 from typing import Dict, List, Optional
@@ -11,18 +11,16 @@ from system import collector as system_collector
 from system import resource_policy
 from system import system_agent
 
-_QUOTA_ADVICE = {
-    "cerebras": "Cerebras free tier resets daily",
-    "groq": "Groq free tier resets daily",
-    "huggingface": "Hugging Face included credits reset monthly and may be very limited",
-}
-
 
 class ModelRouter:
     def __init__(self, providers: Optional[List[LLMProvider]] = None):
-        self._providers: Dict[str, LLMProvider] = {
-            p.name: p for p in (providers or [OllamaProvider(), CerebrasProvider(), GroqProvider(), HuggingFaceProvider()])
-        }
+        # In local-only mode do not even construct cloud clients. This makes a
+        # test run deterministic and prevents quota failures from contaminating
+        # the conversation path.
+        default = [OllamaProvider()]
+        if config.CLOUD_LLM_ENABLED:
+            default += [CerebrasProvider(), GroqProvider(), HuggingFaceProvider()]
+        self._providers: Dict[str, LLMProvider] = {p.name: p for p in (providers or default)}
         self._working_provider: Optional[str] = None
         self._exhausted: set = set()
 
@@ -39,40 +37,34 @@ class ModelRouter:
                 advice = resource_policy.advise(snap)
             except Exception:
                 advice = None
-
-            if advice is not None and advice.avoid_local:
-                # Resource pressure is a preference signal, not a reason to
-                # make Prixon brain-dead. If every remote provider is already
-                # exhausted/unavailable, retain local as the final fallback.
+            # In local-only mode, resource pressure is advisory. We still need
+            # a brain to interpret the request, and Ollama is the only one.
+            if advice is not None and advice.avoid_local and not config.CLOUD_LLM_ENABLED:
+                advice = resource_policy.RoutingAdvice(
+                    avoid_local=False, prefer_local=True,
+                    reason=f"local-only mode retained despite {advice.reason}",
+                )
+            elif advice is not None and advice.avoid_local:
                 remote_available = [p for p in available if p != "local"]
                 if remote_available:
                     available.remove("local")
                 else:
-                    advice = resource_policy.RoutingAdvice(
-                        avoid_local=False,
-                        prefer_local=True,
-                        reason=f"local retained as last-resort brain despite {advice.reason}",
-                    )
+                    available = [p for p in available if p == "local"]
             elif advice is not None and advice.prefer_local and available[0] != "local":
                 available.remove("local")
                 available.insert(0, "local")
 
         if config.DEBUG:
             reason = advice.reason if advice else "n/a"
-            print(f"[MODEL_ROUTER] chain={available} advice={reason}", flush=True)
+            print(f"[MODEL_ROUTER] cloud_enabled={config.CLOUD_LLM_ENABLED} chain={available} advice={reason}", flush=True)
         return available
 
     def call(self, system_prompt: str, user_message: str, *, max_tokens: int, temperature: float) -> str:
         chain = self._provider_chain()
         if not chain:
-            if self._exhausted:
-                tried = ", ".join(sorted(self._exhausted))
-                raise RuntimeError(
-                    f"Every currently configured provider ({tried}) is unavailable or out of quota. "
-                    "Prixon can continue offline only when the local Ollama provider is reachable."
-                )
             raise RuntimeError(
-                "No LLM provider is configured. Run Ollama locally or configure a cloud provider in .env."
+                "The local Ollama brain is unavailable. Start Ollama and ensure "
+                f"'{config.OLLAMA_MODEL}' is installed. Cloud providers are disabled for this test run."
             )
 
         if self._working_provider in chain:
@@ -94,12 +86,11 @@ class ModelRouter:
                 if config.DEBUG:
                     print(f"[MODEL_ROUTER] provider={name} failed kind={kind} error={exc}", flush=True)
                 if kind == "auth":
-                    raise RuntimeError(f"{name} rejected its credentials (check .env).") from exc
+                    raise RuntimeError(f"{name} rejected its credentials (check local configuration).") from exc
                 if kind == "quota":
                     self._exhausted.add(name)
                 continue
-
-        raise RuntimeError(f"None of the available providers ({', '.join(chain)}) could handle the request right now. Last error: {last_exc}") from last_exc
+        raise RuntimeError(f"Local Ollama could not handle the request. Last error: {last_exc}") from last_exc
 
 
 _default_router: Optional[ModelRouter] = None
