@@ -1,4 +1,4 @@
-"""Context engine: references -> lexical -> semantic -> grounded LLM reasoning."""
+"""Context engine: references -> live environment -> lexical -> semantic -> grounded LLM reasoning."""
 from __future__ import annotations
 
 import time
@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 import goal_engine
 import reference_resolver
 import tier2
+import tools
 from agent_state import AgentState
 from data_store import ActionGroup
 from memory import UnifiedMemory
@@ -15,13 +16,11 @@ from nlu import NLUResult
 from nlu import resolve as llm_resolve
 from system import system_agent
 
-
 @dataclass
 class RoutedResult:
     result: NLUResult
     tier: str
     debug: Dict[str, Any]
-
 
 def _group_for_action(groups: Dict[str, ActionGroup], action: str):
     wanted = (action or "").lower()
@@ -29,7 +28,6 @@ def _group_for_action(groups: Dict[str, ActionGroup], action: str):
         if (group.action or "").lower() == wanted:
             return group
     return None
-
 
 def _snapshot_context(snapshot) -> Dict[str, Any]:
     if snapshot is None:
@@ -46,7 +44,6 @@ def _snapshot_context(snapshot) -> Dict[str, Any]:
         "top_cpu": [{"name": p.name, "pid": p.pid, "cpu_percent": p.cpu_percent} for p in snapshot.processes.top_by_cpu[:5]],
         "top_memory": [{"name": p.name, "pid": p.pid, "memory_mb": p.memory_mb} for p in snapshot.processes.top_by_memory[:5]],
     }
-
 
 def _compact_agent_context(state: AgentState, memory: UnifiedMemory, patterns=None) -> Dict[str, Any]:
     snapshot = system_agent.latest_snapshot()
@@ -67,12 +64,41 @@ def _compact_agent_context(state: AgentState, memory: UnifiedMemory, patterns=No
         "recent_events": recent,
     }
 
+def _live_app_status(user_text: str, groups: Dict[str, ActionGroup], state: AgentState) -> Optional[RoutedResult]:
+    """Resolve app-status questions from the actual Windows process table.
+
+    This deterministic environment path runs before retrieval/LLM routing so
+    a request such as 'check if Spotify is running' cannot accidentally map
+    to generic 'list top processes', and it cannot fail because a cloud model
+    has exhausted its quota.
+    """
+    hint = tier2.extract_running_app_hint(user_text)
+    if not hint:
+        return None
+    group = _group_for_action(groups, "diagnostic")
+    if group is None:
+        return None
+    process = tools.find_running_app(hint)
+    state.note_referenced_app(process or hint, hint)
+    params = {"app_name_hint": hint, "resolved_process": process}
+    reply = f"Yes — {hint} is running." if process else f"No — I don't see {hint} running right now."
+    return RoutedResult(
+        NLUResult(match_target=group.target, confidence="high", reply=reply,
+                  intent=group.intent or "diagnostic", parameters=params,
+                  reference="none", raw={"direct_live_app_status": True, "process": process}),
+        "environment", {"reason": "direct live app-status resolution", "app": hint, "process": process},
+    )
 
 def route(user_text: str, candidates: List[Dict], state: AgentState, memory: UnifiedMemory,
           groups: Dict[str, ActionGroup], assistant_name: Optional[str] = None,
           broad_search: bool = False, semantic_index=None, patterns=None) -> RoutedResult:
     state.begin_turn()
     candidates = goal_engine.bias_candidates(candidates, state.active_goal, groups)
+
+    live = _live_app_status(user_text, groups, state)
+    if live is not None:
+        return live
+
     tier1 = reference_resolver.resolve(user_text, state)
     if tier1.resolved:
         target = tier1.target
