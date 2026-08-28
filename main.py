@@ -8,6 +8,14 @@ except AttributeError:
     pass
 
 import config
+import nlu
+from ollama_provider import install as install_ollama_provider
+
+# Register the local Ollama provider into the existing NLU provider chain.
+# This keeps the current NLU architecture intact while making the local model
+# the normal first choice and retaining cloud failover.
+install_ollama_provider(nlu)
+
 import context_engine
 import executor
 import goal_engine
@@ -56,8 +64,6 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
         say(chit.reply, use_voice)
         return
 
-    # Retrieval is only a fast candidate generator. The LLM (or Tier 1) gets
-    # a shortlist, and when lexical retrieval is weak it gets the whole catalog.
     candidates = index.search(user_text)
     broad = not candidates or candidates[0]["score"] < config.MIN_TFIDF_SCORE
     if broad:
@@ -106,10 +112,6 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
         memory.remember_turn(user_text, result, group.target_name)
         return
 
-    # exec_result.ok means "the call didn't raise", not "it's confirmed
-    # working" -- only treat the task as genuinely successful, and only
-    # update state/say "Done" as such, when verification agrees (or the
-    # action has no way to be verified at all, in which case we say so).
     verified_ok = dispatched.ok and (v is None or v.confirmed is not False)
     state.note_successful_task(result.match_target, group.target_name, result.intent)
     if verified_ok:
@@ -124,7 +126,6 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
     if v and v.verified and v.confirmed is False:
         say(f"I tried, but I couldn't confirm it actually opened ({v.evidence}).", use_voice)
     elif dispatched.data:
-        # Diagnostics return data; keep it readable without dumping huge JSON.
         text = str(dispatched.data)
         if len(text) > 2500:
             text = text[:2500] + " …"
@@ -135,7 +136,7 @@ def main():
     parser = argparse.ArgumentParser(description="LLM-first personal Windows assistant")
     parser.add_argument("--voice", action="store_true")
     parser.add_argument("--debug", action="store_true",
-                         help="Print tier routing / context / verification traces (section 29)")
+                         help="Print tier routing / context / verification traces")
     args = parser.parse_args()
 
     use_voice = args.voice
@@ -149,10 +150,11 @@ def main():
     memory = UnifiedMemory()
     registry = CapabilityRegistry(index)
     router = ToolRouter(registry)
-    semantic_index = SemanticIndex(index.groups)  # loads in background; may still be unready for a while
+    semantic_index = SemanticIndex(index.groups)
     print(f"Loaded {len(index.entries)} language examples across {len(index.groups)} executable actions.")
     _trace("CAPABILITIES", registry.summary())
     _trace("SEMANTIC", "loading in background" if not semantic_index.ready else "ready")
+    _trace("LLM", f"preferred={config.LLM_PROVIDER} local={config.OLLAMA_MODEL}")
     say(persona.greeting(), use_voice)
 
     while True:
@@ -165,11 +167,9 @@ def main():
         try:
             handle_command(text, index, use_voice, state, memory, router, semantic_index)
         except RuntimeError as exc:
-            # nlu._call_llm() raises RuntimeError for both "nothing configured"
-            # and "this one request timed out/failed." Neither should kill the
-            # whole session (spec section 25/32: stay operational on provider
-            # failure) -- report it and keep the loop alive so the next message
-            # gets a fresh attempt instead of the app just exiting.
+            # Provider failure must not kill the assistant loop. The NLU layer
+            # already tries the configured provider chain; this is the final
+            # guard for an unexpected all-provider failure.
             say(f"I'm having trouble reaching my language model right now: {exc}", use_voice)
         except Exception as exc:
             say(f"Something went wrong on my side: {exc}", use_voice)
