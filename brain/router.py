@@ -1,12 +1,4 @@
-"""Provider chain + failover (spec sections 7-8), now with resource-aware
-routing (spec section 9, Slice 2).
-
-Same "try last-working provider first" and per-session quota-exhaustion
-memory as before. New in Slice 2: before returning the chain, this asks
-system.resource_policy whether current RAM/CPU/network state should exclude
-or prefer "local" -- the actual decision logic lives in resource_policy.py
-(kept pure/testable there); this just applies it to the chain.
-"""
+"""Provider chain + failover with resource-aware local/cloud routing."""
 from __future__ import annotations
 
 from typing import Dict, List, Optional
@@ -20,19 +12,14 @@ from system import resource_policy
 from system import system_agent
 
 _QUOTA_ADVICE = {
-    "cerebras": "https://cloud.cerebras.ai (free tier resets daily)",
-    "groq": "https://console.groq.com (free tier resets daily)",
-    "huggingface": "https://huggingface.co/settings/billing (free tier resets monthly, and it's a very small allowance)",
+    "cerebras": "Cerebras free tier resets daily",
+    "groq": "Groq free tier resets daily",
+    "huggingface": "Hugging Face included credits reset monthly and may be very limited",
 }
 
 
 class ModelRouter:
     def __init__(self, providers: Optional[List[LLMProvider]] = None):
-        # "local" first in preference order once it's actually available --
-        # cheap/private/offline-capable requests should prefer it once
-        # Slice 2 adds real task-difficulty and resource checks. For now,
-        # config.LLM_PROVIDER still picks which one goes first, matching
-        # existing behavior exactly.
         self._providers: Dict[str, LLMProvider] = {
             p.name: p for p in (providers or [OllamaProvider(), CerebrasProvider(), GroqProvider(), HuggingFaceProvider()])
         }
@@ -43,33 +30,37 @@ class ModelRouter:
         preferred = config.LLM_PROVIDER if config.LLM_PROVIDER in self._providers else None
         fallback_order = [p for p in config.PROVIDER_FALLBACK_ORDER if p in self._providers]
         ordered = ([preferred] if preferred else []) + [p for p in fallback_order if p != preferred]
-        chain = [p for p in ordered if self._providers[p].available() and p not in self._exhausted]
+        available = [p for p in ordered if self._providers[p].available() and p not in self._exhausted]
 
-        # Resource-aware adjustment (spec section 9). Prefers the System
-        # Agent's cached background poll (spec section 52: monitoring must
-        # not block the main loop) -- falls back to one direct synchronous
-        # snapshot only if that background agent isn't running yet (e.g.
-        # tests, or main.py hasn't started it), matching Slice 2's original
-        # behavior exactly in that case.
         advice = None
-        if "local" in chain:
+        if "local" in available:
             try:
                 snap = system_agent.latest_snapshot() or system_collector.snapshot(probe_internet=True, cpu_interval=0.0)
                 advice = resource_policy.advise(snap)
             except Exception:
-                advice = None  # never let a monitor failure break routing
+                advice = None
 
-            if advice is not None:
-                if advice.avoid_local:
-                    chain.remove("local")
-                elif advice.prefer_local and chain[0] != "local":
-                    chain.remove("local")
-                    chain.insert(0, "local")
+            if advice is not None and advice.avoid_local:
+                # Resource pressure is a preference signal, not a reason to
+                # make Prixon brain-dead. If every remote provider is already
+                # exhausted/unavailable, retain local as the final fallback.
+                remote_available = [p for p in available if p != "local"]
+                if remote_available:
+                    available.remove("local")
+                else:
+                    advice = resource_policy.RoutingAdvice(
+                        avoid_local=False,
+                        prefer_local=True,
+                        reason=f"local retained as last-resort brain despite {advice.reason}",
+                    )
+            elif advice is not None and advice.prefer_local and available[0] != "local":
+                available.remove("local")
+                available.insert(0, "local")
 
         if config.DEBUG:
-            print(f"[MODEL_ROUTER] chain={chain} advice={advice.reason if advice else 'n/a (local not in chain)'}", flush=True)
-
-        return chain
+            reason = advice.reason if advice else "n/a"
+            print(f"[MODEL_ROUTER] chain={available} advice={reason}", flush=True)
+        return available
 
     def call(self, system_prompt: str, user_message: str, *, max_tokens: int, temperature: float) -> str:
         chain = self._provider_chain()
@@ -77,12 +68,11 @@ class ModelRouter:
             if self._exhausted:
                 tried = ", ".join(sorted(self._exhausted))
                 raise RuntimeError(
-                    f"Every configured provider ({tried}) is out of free quota for "
-                    f"now. " + " / ".join(f"{p}: {_QUOTA_ADVICE[p]}" for p in sorted(self._exhausted) if p in _QUOTA_ADVICE)
+                    f"Every currently configured provider ({tried}) is unavailable or out of quota. "
+                    "Prixon can continue offline only when the local Ollama provider is reachable."
                 )
             raise RuntimeError(
-                "No LLM provider is configured. Set at least one of CEREBRAS_API_KEY, "
-                "GROQ_API_KEY, or HF_TOKEN in .env, or run a local Ollama server."
+                "No LLM provider is configured. Run Ollama locally or configure a cloud provider in .env."
             )
 
         if self._working_provider in chain:
@@ -98,29 +88,20 @@ class ModelRouter:
                 if config.DEBUG:
                     print(f"[MODEL_ROUTER] used provider={name}", flush=True)
                 return result
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 last_exc = exc
                 kind = provider.classify_error(exc)
                 if config.DEBUG:
                     print(f"[MODEL_ROUTER] provider={name} failed kind={kind} error={exc}", flush=True)
                 if kind == "auth":
-                    raise RuntimeError(
-                        f"{name} rejected its credentials (check the matching API key/token in .env)."
-                    ) from exc
+                    raise RuntimeError(f"{name} rejected its credentials (check .env).") from exc
                 if kind == "quota":
                     self._exhausted.add(name)
-                # cold_start/unsupported/other/quota: fall through to the next provider.
                 continue
 
-        tried = ", ".join(chain)
-        raise RuntimeError(
-            f"None of the available providers ({tried}) could handle the request right now. Last error: {last_exc}"
-        ) from last_exc
+        raise RuntimeError(f"None of the available providers ({', '.join(chain)}) could handle the request right now. Last error: {last_exc}") from last_exc
 
 
-# Module-level singleton -- mirrors nlu.py's previous module-level session
-# state (_working_provider, _exhausted_providers) so behavior across a
-# single run is unchanged: one router, one memory of what's exhausted/working.
 _default_router: Optional[ModelRouter] = None
 
 
