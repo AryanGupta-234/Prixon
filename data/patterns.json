@@ -1,0 +1,23 @@
+{
+  "preferences": {},
+  "habits": {
+    "list running processes": {
+      "observations": 2,
+      "successes": 2,
+      "failures": 0,
+      "hours": {
+        "11": 2
+      }
+    },
+    "close an application": {
+      "observations": 3,
+      "successes": 0,
+      "failures": 3,
+      "hours": {
+        "11": 3
+      }
+    }
+  },
+  "procedures": {},
+  "updated_at": 1787895458.0630286
+}

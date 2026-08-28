@@ -77,16 +77,9 @@ def _make_alert_handler(use_voice):
     return _on_event
 
 
-def _diagnostic_reply(user_text: str, group, data, state: AgentState, parameters=None):
-    """Turn diagnostic data into a concise answer using current context.
-
-    `parameters` is important for reference-only turns such as "check again":
-    the user's new utterance may contain no entity name, but the situation
-    state has already resolved the concrete entity for this execution.
-    """
+def _diagnostic_reply(user_text: str, group, data, state: AgentState):
     if data is None:
         return None
-    parameters = parameters or {}
     parsed = data
     if isinstance(data, str):
         try:
@@ -94,18 +87,14 @@ def _diagnostic_reply(user_text: str, group, data, state: AgentState, parameters
         except Exception:
             parsed = None
     if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
-        hint = parameters.get("app_name_hint") or tier2.extract_app_name_hint(user_text) or tier2.extract_running_app_hint(user_text)
+        hint = tier2.extract_app_name_hint(user_text)
         if hint:
-            resolved = parameters.get("resolved_process") or tools.find_running_app(hint)
+            resolved = tools.find_running_app(hint)
             if resolved:
                 matching = [row for row in parsed if str(row.get("Name", "")).lower() == resolved.lower()]
-                # Some Windows process output can normalize names differently;
-                # if the live resolver found the process, a verified process
-                # lookup is still authoritative even when the diagnostic JSON
-                # omitted it between samples.
-                if matching or resolved:
-                    state.note_referenced_app(resolved, hint, operation="application_status")
-                    count = len(matching) or 1
+                if matching:
+                    state.note_referenced_app(resolved, hint)
+                    count = len(matching)
                     return f"Yes — {hint} is running. I found {count} {hint} process{'es' if count != 1 else ''}."
             return f"No — I don't see {hint} running right now."
         if all("Name" in row and "CPU" in row for row in parsed):
@@ -125,8 +114,16 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
         say(chit.reply, use_voice)
         return
 
-    # Semantic retrieval is the sole candidate source. The historical TF-IDF
-    # shim remains retired and is never used to decide an action.
+    # NOTE: index.search() is a retired TF-IDF shim that always returns [].
+    # It used to gate a fallback to index.full_catalog() (all 208 actions)
+    # whenever the top score was low -- since the shim always returns [],
+    # that fallback previously fired on EVERY request, dumping the entire
+    # ~21k-character catalog into the Qwen prompt regardless of whether
+    # semantic retrieval (FastEmbed) already had a good narrow answer. On a
+    # CPU-only box with no num_ctx set, that alone was enough to blow past
+    # the 60s Ollama timeout. Semantic retrieval (context_engine.route) is
+    # now the sole source of candidates; we no longer seed with the full
+    # catalog here.
     candidates = []
     broad = False
     if not DEBUG:
@@ -187,7 +184,7 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
         return
 
     verified_ok = dispatched.ok and (v is None or v.confirmed is not False)
-    concrete_name = resolved_process or result.parameters.get("app_name_hint") or group.target_name
+    concrete_name = resolved_process or group.target_name
     previous = state.last_target_name
     state.note_successful_task(result.match_target, concrete_name, result.intent, resolved_name=resolved_process)
     if verified_ok:
@@ -206,7 +203,7 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
     if v and v.verified and v.confirmed is False:
         say(f"I tried, but I couldn't confirm it actually opened ({v.evidence}).", use_voice)
     elif dispatched.data:
-        concise = _diagnostic_reply(user_text, group, dispatched.data, state, result.parameters)
+        concise = _diagnostic_reply(user_text, group, dispatched.data, state)
         if concise:
             say(concise, use_voice)
         else:
