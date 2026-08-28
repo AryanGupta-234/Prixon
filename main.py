@@ -21,6 +21,7 @@ import tools
 import voice
 from agent_state import AgentState
 from brain.router import get_router
+from cognition.experience import ExperienceModel
 from data_store import ActionIndex
 from embeddings import SemanticIndex
 from memory import UnifiedMemory
@@ -60,11 +61,8 @@ def _trace(label, payload):
 def _format_alert(event) -> str:
     minutes = event.duration_seconds / 60.0
     duration_txt = f"{minutes:.0f} minute{'s' if minutes >= 2 else ''}" if minutes >= 1 else f"{event.duration_seconds:.0f} seconds"
-    metric_txt = {
-        "cpu_usage_percent": "CPU usage",
-        "memory_percent": "memory usage",
-        "disk_used_percent": "disk usage",
-    }.get(event.metric, event.metric)
+    metric_txt = {"cpu_usage_percent": "CPU usage", "memory_percent": "memory usage",
+                  "disk_used_percent": "disk usage"}.get(event.metric, event.metric)
     base = f"Heads up -- {metric_txt} has been around {event.value:.0f}% for about {duration_txt}."
     if event.top_process:
         base += f" {event.top_process} is using the most of it."
@@ -107,11 +105,12 @@ def _diagnostic_reply(user_text: str, group, data, state: AgentState):
     return None
 
 
-def handle_command(user_text, index, use_voice, state: AgentState, memory: UnifiedMemory, router: ToolRouter,
-                   semantic_index: SemanticIndex):
+def handle_command(user_text, index, use_voice, state: AgentState, memory: UnifiedMemory,
+                   router: ToolRouter, semantic_index: SemanticIndex, experience: ExperienceModel):
     chit = small_talk.resolve(user_text)
     if chit.handled:
         _trace("TIER", "tier0-smalltalk")
+        memory.conversation.turns.append(__import__('nlu').Turn(user=user_text, reply=chit.reply))
         say(chit.reply, use_voice)
         return
 
@@ -148,6 +147,7 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
             say(f"I don't see anything matching '{hint}' currently running.", use_voice)
             memory.record_event("task_failed", intent=result.intent, target=result.match_target,
                                 target_name=group.target_name, success=False)
+            experience.observe("task_failed", result.match_target, group.target_name, False)
             return
         result.parameters = {**result.parameters, "resolved_process": resolved_process, "app_name_hint": hint}
         result.reply = f"Found {resolved_process} running."
@@ -163,6 +163,7 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
             say(persona.cancelled(), use_voice)
             memory.record_event("task_failed", intent=result.intent, target=result.match_target,
                                 target_name=group.target_name, success=False)
+            experience.observe("task_failed", result.match_target, group.target_name, False)
             return
     else:
         say(result.reply, use_voice)
@@ -177,6 +178,7 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
                             target_name=group.target_name, success=False,
                             parameters={**result.parameters, "verification": v.to_dict() if v else None})
         memory.remember_turn(user_text, result, group.target_name)
+        experience.observe("task_failed", result.match_target, group.target_name, False)
         return
 
     verified_ok = dispatched.ok and (v is None or v.confirmed is not False)
@@ -189,7 +191,9 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
                         target_name=concrete_name, success=verified_ok,
                         parameters={**result.parameters, "verification": v.to_dict() if v else None})
     memory.remember_turn(user_text, result, concrete_name)
-    _trace("MEMORY", "episode stored")
+    experience.observe("task_completed", result.match_target, concrete_name, verified_ok)
+    state.learned_context = experience.context()
+    _trace("MEMORY", "episode + experience stored")
 
     if v and v.verified and v.confirmed is False:
         say(f"I tried, but I couldn't confirm it actually opened ({v.evidence}).", use_voice)
@@ -207,10 +211,8 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
 def main():
     parser = argparse.ArgumentParser(description="LLM-first personal Windows assistant")
     parser.add_argument("--voice", action="store_true")
-    parser.add_argument("--debug", action="store_true",
-                        help="Print tier routing / context / verification traces (section 29)")
-    parser.add_argument("--healthcheck", action="store_true",
-                        help="Run self-diagnostics (spec section 49) once and exit, without starting the REPL")
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--healthcheck", action="store_true")
     args = parser.parse_args()
 
     use_voice = args.voice
@@ -222,12 +224,15 @@ def main():
     index = ActionIndex()
     state = AgentState()
     memory = UnifiedMemory()
+    experience = ExperienceModel()
+    state.learned_context = experience.context()
     registry = CapabilityRegistry(index)
     router = ToolRouter(registry)
     semantic_index = SemanticIndex(index.groups)
     print(f"Loaded {len(index.entries)} language examples across {len(index.groups)} executable actions.")
     _trace("CAPABILITIES", registry.summary())
     _trace("SEMANTIC", "loading in background" if not semantic_index.ready else "ready")
+    _trace("LEARNING", state.learned_context)
 
     agent = system_agent.start_default_agent(memory=memory, on_event=_make_alert_handler(use_voice))
     _trace("SYSTEM_AGENT", f"started, polling every {agent.poll_interval}s")
@@ -256,7 +261,7 @@ def main():
             print(diagnostics.format_report(checks))
             continue
         try:
-            handle_command(text, index, use_voice, state, memory, router, semantic_index)
+            handle_command(text, index, use_voice, state, memory, router, semantic_index, experience)
         except RuntimeError as exc:
             say(f"I'm having trouble reaching my language model right now: {exc}", use_voice)
         except Exception as exc:
