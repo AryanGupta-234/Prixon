@@ -22,6 +22,7 @@ import voice
 from agent_state import AgentState
 from brain.router import get_router
 from cognition.experience import ExperienceModel
+from cognition.patterns import PatternMemory
 from data_store import ActionIndex
 from embeddings import SemanticIndex
 from memory import UnifiedMemory
@@ -61,8 +62,7 @@ def _trace(label, payload):
 def _format_alert(event) -> str:
     minutes = event.duration_seconds / 60.0
     duration_txt = f"{minutes:.0f} minute{'s' if minutes >= 2 else ''}" if minutes >= 1 else f"{event.duration_seconds:.0f} seconds"
-    metric_txt = {"cpu_usage_percent": "CPU usage", "memory_percent": "memory usage",
-                  "disk_used_percent": "disk usage"}.get(event.metric, event.metric)
+    metric_txt = {"cpu_usage_percent": "CPU usage", "memory_percent": "memory usage", "disk_used_percent": "disk usage"}.get(event.metric, event.metric)
     base = f"Heads up -- {metric_txt} has been around {event.value:.0f}% for about {duration_txt}."
     if event.top_process:
         base += f" {event.top_process} is using the most of it."
@@ -77,7 +77,6 @@ def _make_alert_handler(use_voice):
 
 
 def _diagnostic_reply(user_text: str, group, data, state: AgentState):
-    """Turn common diagnostic output into conversational answers."""
     if data is None:
         return None
     parsed = data
@@ -86,7 +85,6 @@ def _diagnostic_reply(user_text: str, group, data, state: AgentState):
             parsed = json.loads(data)
         except Exception:
             parsed = None
-
     if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
         hint = tier2.extract_app_name_hint(user_text)
         if hint:
@@ -106,7 +104,8 @@ def _diagnostic_reply(user_text: str, group, data, state: AgentState):
 
 
 def handle_command(user_text, index, use_voice, state: AgentState, memory: UnifiedMemory,
-                   router: ToolRouter, semantic_index: SemanticIndex, experience: ExperienceModel):
+                   router: ToolRouter, semantic_index: SemanticIndex, experience: ExperienceModel,
+                   patterns: PatternMemory):
     chit = small_talk.resolve(user_text)
     if chit.handled:
         _trace("TIER", "tier0-smalltalk")
@@ -118,36 +117,31 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
     broad = not candidates or candidates[0]["score"] < config.MIN_TFIDF_SCORE
     if broad:
         candidates = index.full_catalog()
-
     if not DEBUG:
         print("(thinking...)", flush=True)
     routed = context_engine.route(user_text, candidates, state, memory, index.groups, config.ASSISTANT_NAME, broad,
-                                   semantic_index=semantic_index)
+                                   semantic_index=semantic_index, patterns=patterns)
     result = routed.result
     _trace("TIER", routed.tier)
     _trace("CONTEXT", routed.debug)
-
     if not result.match_target or result.confidence in {"none", "low"}:
         say(result.reply or persona.failure_fallback(), use_voice)
         return
-
     group = index.get_group(result.match_target)
     if group is None:
         say(persona.failure_fallback(), use_voice)
         return
 
-    memory.record_event("task_started", intent=result.intent, target=result.match_target,
-                        target_name=group.target_name, parameters=result.parameters)
-
+    memory.record_event("task_started", intent=result.intent, target=result.match_target, target_name=group.target_name, parameters=result.parameters)
     resolved_process = None
     if (group.action or "").lower() == "close_app_dynamic":
         hint = result.parameters.get("app_name_hint") or tier2.extract_app_name_hint(user_text) or group.target_name
         resolved_process = tools.find_running_app(hint)
         if not resolved_process:
             say(f"I don't see anything matching '{hint}' currently running.", use_voice)
-            memory.record_event("task_failed", intent=result.intent, target=result.match_target,
-                                target_name=group.target_name, success=False)
+            memory.record_event("task_failed", intent=result.intent, target=result.match_target, target_name=group.target_name, success=False)
             experience.observe("task_failed", result.match_target, group.target_name, False)
+            patterns.observe_action(group.target_name, result.intent, False)
             return
         result.parameters = {**result.parameters, "resolved_process": resolved_process, "app_name_hint": hint}
         result.reply = f"Found {resolved_process} running."
@@ -161,9 +155,9 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
         confirmation = get_input(use_voice).lower().strip()
         if confirmation not in YES:
             say(persona.cancelled(), use_voice)
-            memory.record_event("task_failed", intent=result.intent, target=result.match_target,
-                                target_name=group.target_name, success=False)
+            memory.record_event("task_failed", intent=result.intent, target=result.match_target, target_name=group.target_name, success=False)
             experience.observe("task_failed", result.match_target, group.target_name, False)
+            patterns.observe_action(group.target_name, result.intent, False)
             return
     else:
         say(result.reply, use_voice)
@@ -171,29 +165,30 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
     dispatched = router.dispatch(group, result.parameters)
     v = dispatched.verification
     _trace("VERIFICATION", f"ok={dispatched.ok} " + str(v.to_dict() if v else "not attempted"))
-
     if not dispatched.ok:
         say(dispatched.message, use_voice)
-        memory.record_event("task_failed", intent=result.intent, target=result.match_target,
-                            target_name=group.target_name, success=False,
+        memory.record_event("task_failed", intent=result.intent, target=result.match_target, target_name=group.target_name, success=False,
                             parameters={**result.parameters, "verification": v.to_dict() if v else None})
         memory.remember_turn(user_text, result, group.target_name)
         experience.observe("task_failed", result.match_target, group.target_name, False)
+        patterns.observe_action(group.target_name, result.intent, False)
         return
 
     verified_ok = dispatched.ok and (v is None or v.confirmed is not False)
     concrete_name = resolved_process or group.target_name
+    previous = state.last_target_name
     state.note_successful_task(result.match_target, concrete_name, result.intent, resolved_name=resolved_process)
     if verified_ok:
         state.active_goal = goal_engine.topic_for_group(group)
         _trace("GOAL", state.active_goal)
-    memory.record_event("task_completed", intent=result.intent, target=result.match_target,
-                        target_name=concrete_name, success=verified_ok,
+    memory.record_event("task_completed", intent=result.intent, target=result.match_target, target_name=concrete_name, success=verified_ok,
                         parameters={**result.parameters, "verification": v.to_dict() if v else None})
     memory.remember_turn(user_text, result, concrete_name)
     experience.observe("task_completed", result.match_target, concrete_name, verified_ok)
+    patterns.observe_action(concrete_name, result.intent, verified_ok)
+    patterns.observe_transition(previous, concrete_name, verified_ok)
     state.learned_context = experience.context()
-    _trace("MEMORY", "episode + experience stored")
+    _trace("MEMORY", "episode + experience + patterns stored")
 
     if v and v.verified and v.confirmed is False:
         say(f"I tried, but I couldn't confirm it actually opened ({v.evidence}).", use_voice)
@@ -209,12 +204,11 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LLM-first personal Windows assistant")
+    parser = argparse.ArgumentParser(description="LLM-first Windows personal assistant")
     parser.add_argument("--voice", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--healthcheck", action="store_true")
     args = parser.parse_args()
-
     use_voice = args.voice
     if use_voice and not voice.voice_available():
         print("Voice dependencies are unavailable; falling back to text mode.\n")
@@ -225,6 +219,7 @@ def main():
     state = AgentState()
     memory = UnifiedMemory()
     experience = ExperienceModel()
+    patterns = PatternMemory()
     state.learned_context = experience.context()
     registry = CapabilityRegistry(index)
     router = ToolRouter(registry)
@@ -232,11 +227,10 @@ def main():
     print(f"Loaded {len(index.entries)} language examples across {len(index.groups)} executable actions.")
     _trace("CAPABILITIES", registry.summary())
     _trace("SEMANTIC", "loading in background" if not semantic_index.ready else "ready")
-    _trace("LEARNING", state.learned_context)
+    _trace("LEARNING", {"experience": state.learned_context, "patterns": patterns.context()})
 
     agent = system_agent.start_default_agent(memory=memory, on_event=_make_alert_handler(use_voice))
     _trace("SYSTEM_AGENT", f"started, polling every {agent.poll_interval}s")
-
     if args.healthcheck:
         deadline = time.time() + 2.0
         while not agent.ready and time.time() < deadline:
@@ -247,7 +241,6 @@ def main():
         return
 
     say(persona.greeting(), use_voice)
-
     while True:
         text = get_input(use_voice)
         if not text:
@@ -261,7 +254,7 @@ def main():
             print(diagnostics.format_report(checks))
             continue
         try:
-            handle_command(text, index, use_voice, state, memory, router, semantic_index, experience)
+            handle_command(text, index, use_voice, state, memory, router, semantic_index, experience, patterns)
         except RuntimeError as exc:
             say(f"I'm having trouble reaching my language model right now: {exc}", use_voice)
         except Exception as exc:
