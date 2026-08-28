@@ -1,4 +1,4 @@
-"""Context engine: deterministic references -> lexical -> semantic -> LLM."""
+"""Context engine: references -> lexical -> semantic -> grounded LLM reasoning."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,6 +12,7 @@ from data_store import ActionGroup
 from memory import UnifiedMemory
 from nlu import NLUResult
 from nlu import resolve as llm_resolve
+from system import system_agent
 
 
 @dataclass
@@ -29,6 +30,86 @@ def _group_for_action(groups: Dict[str, ActionGroup], action: str):
     return None
 
 
+def _snapshot_context(snapshot) -> Dict[str, Any]:
+    """Convert the live system snapshot into a small world-state view.
+
+    The brain needs facts that change its decision, not a raw process dump.
+    Keep only current resource levels, connectivity, power and the heaviest
+    processes so prompts stay small and grounded.
+    """
+    if snapshot is None:
+        return {"available": False}
+    return {
+        "available": True,
+        "age_seconds": round(max(0.0, __import__("time").time() - snapshot.timestamp), 1),
+        "cpu": {
+            "usage_percent": snapshot.cpu.usage_percent,
+            "cores": snapshot.cpu.core_count,
+            "frequency_mhz": snapshot.cpu.frequency_mhz,
+        },
+        "memory": {
+            "percent": snapshot.memory.percent,
+            "available_mb": snapshot.memory.available_mb,
+            "used_mb": snapshot.memory.used_mb,
+            "total_mb": snapshot.memory.total_mb,
+        },
+        "disk": {
+            "free_gb": snapshot.disk.free_gb,
+            "used_percent": snapshot.disk.used_percent,
+        },
+        "network": {"online": snapshot.network.online},
+        "battery": {
+            "present": snapshot.battery.present,
+            "percent": snapshot.battery.percent,
+            "charging": snapshot.battery.charging,
+        },
+        "gpu": {
+            "available": snapshot.gpu.available,
+            "utilization_percent": snapshot.gpu.utilization_percent,
+            "vram_used_mb": snapshot.gpu.vram_used_mb,
+            "vram_total_mb": snapshot.gpu.vram_total_mb,
+        },
+        "top_cpu": [
+            {"name": p.name, "pid": p.pid, "cpu_percent": p.cpu_percent}
+            for p in snapshot.processes.top_by_cpu[:5]
+        ],
+        "top_memory": [
+            {"name": p.name, "pid": p.pid, "memory_mb": p.memory_mb}
+            for p in snapshot.processes.top_by_memory[:5]
+        ],
+    }
+
+
+def _compact_agent_context(state: AgentState, memory: UnifiedMemory) -> Dict[str, Any]:
+    """Build the assistant's current world model for the reasoning tier."""
+    try:
+        snapshot = system_agent.latest_snapshot()
+    except Exception:
+        snapshot = None
+
+    state.computer_state = _snapshot_context(snapshot)
+
+    recent = []
+    for ep in memory.episodes[-8:]:
+        recent.append({
+            "event": ep.event_type,
+            "target": ep.target_name or ep.target,
+            "intent": ep.intent,
+            "success": ep.success,
+        })
+
+    return {
+        "active_goal": state.active_goal,
+        "last_successful_target": state.last_target_name,
+        "last_successful_intent": state.last_intent,
+        "last_referenced_app": state.last_referenced_app,
+        "last_referenced_app_hint": state.last_referenced_app_hint,
+        "tracked_apps": state.open_apps[-12:],
+        "world_state": state.computer_state,
+        "recent_events": recent,
+    }
+
+
 def route(user_text: str, candidates: List[Dict], state: AgentState, memory: UnifiedMemory,
           groups: Dict[str, ActionGroup], assistant_name: Optional[str] = None,
           broad_search: bool = False, semantic_index=None) -> RoutedResult:
@@ -37,9 +118,6 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
     tier1 = reference_resolver.resolve(user_text, state)
     if tier1.resolved:
         target = tier1.target
-        # Some deterministic references identify an operation rather than a
-        # dataset target. Resolve that operation against the real action
-        # catalog so the rest of the executor remains unchanged.
         if not target and tier1.action_hint:
             group = _group_for_action(groups, tier1.action_hint)
             if group:
@@ -85,6 +163,7 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
                 "confidence": t2_semantic.confidence, "reason": t2_semantic.reason,
             })
 
+    memory.conversation.slots["live_agent_context"] = _compact_agent_context(state, memory)
     result = llm_resolve(user_text, candidates, assistant_name, broad_search, memory.conversation)
     return RoutedResult(result, "tier3", {
         "raw": result.raw, "tier1_reason": tier1.reason, "tier2_lexical_reason": t2.reason,

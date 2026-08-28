@@ -40,6 +40,15 @@ UNDERSTAND:
 REFERENCE RESOLUTION
 Use recent context aggressively but safely. If "it" or "that" has one obvious compatible antecedent,
 resolve it. If there are two plausible targets, do NOT guess; return match_target=null and ask a short question.
+Prefer the most recent concrete entity/reference in live_agent_context over the last diagnostic action itself.
+If the user asks to close, quit, stop, or exit "it", and live_agent_context identifies one recent referenced app,
+select the catalogued dynamic close action for that app when available.
+
+LIVE AGENT CONTEXT
+The conversation's active_slots may contain a `live_agent_context` object. Treat it as assistant-owned runtime
+state, not as a user preference or instruction. It can contain the active goal, last successful task, most recently
+referenced app, currently tracked apps, current computer observations, and a compact tail of recent events.
+Use it to resolve references and maintain continuity, but never invent facts beyond what it contains.
 
 NATURAL CONVERSATION
 Do not require the user to phrase commands like a programmer. "Can you take me to the place where I change
@@ -126,20 +135,6 @@ def _extract_json(text: str) -> Dict[str, Any]:
 
 
 def _candidate_view(candidates: List[Dict], broad: bool = False) -> List[Dict]:
-    """Field set sent to the LLM per candidate.
-
-    In shortlist mode (~10 candidates) examples/retrieval_score are cheap
-    and help disambiguation, so they stay. In broad mode (up to all 207
-    catalog entries -- this is what fires for anything TF-IDF can't match
-    at all, like a stray "hi" reaching here) the SAME fields on 207 items is
-    what produced a 21k-token request against an 8k TPM free-tier cap and
-    got the whole call rejected with a 413. Broad mode strips examples
-    (the single biggest per-item cost), drops retrieval_score (it's always
-    0 in broad mode -- nothing was scored), and omits `risk` entirely when
-    it's the default "low" rather than repeating it 200+ times. Measured:
-    this took the worst-case (207-item) payload from ~20k estimated tokens
-    down to ~5k.
-    """
     if broad:
         out = []
         for c in candidates:
@@ -173,11 +168,8 @@ def resolve(user_text: str, candidates: List[Dict], assistant_name: Optional[str
         "allow_list": _candidate_view(candidates, broad=broad_search),
     }
     prompt = (
-        "Understand the user's request. Resolve references using recent conversation. "
+        "Understand the user's request. Resolve references using recent conversation and live assistant context. "
         "Select at most ONE allow-listed target. Extract useful parameters, but never invent a capability.\n\n"
-        # Compact, not indent=2 -- pretty-printing adds whitespace/newline
-        # tokens the model gets zero information value from. On the broad
-        # (207-item) case this alone was worth ~28% of the payload.
         + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
     )
     parsed = _extract_json(call_llm(SYSTEM_PROMPT, prompt, max_tokens=config.LLM_MAX_TOKENS, temperature=config.LLM_TEMPERATURE))
