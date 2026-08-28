@@ -13,11 +13,26 @@ class AgentState:
     last_intent: Optional[str] = None
     last_referenced_app: Optional[str] = None
     last_referenced_app_hint: Optional[str] = None
+    reference_turn: int = -1
+    turn_id: int = 0
 
     open_apps: List[str] = field(default_factory=list)
     computer_state: Dict[str, Any] = field(default_factory=dict)
     learned_context: Dict[str, Any] = field(default_factory=dict)
     execution_state: str = "idle"
+
+    def begin_turn(self):
+        """Advance conversational time and expire stale entity references.
+
+        A reference such as 'it' should survive a few natural follow-ups, but
+        must not remain actionable forever and accidentally close an unrelated
+        application hours later.
+        """
+        self.turn_id += 1
+        if self.last_referenced_app and self.reference_turn >= 0 and self.turn_id - self.reference_turn > 4:
+            self.last_referenced_app = None
+            self.last_referenced_app_hint = None
+            self.reference_turn = -1
 
     def note_successful_task(self, target: str, target_name: str, intent: str,
                              resolved_name: Optional[str] = None):
@@ -25,26 +40,27 @@ class AgentState:
         self.last_target = target
         self.last_target_name = concrete
         self.last_intent = intent
-
         intent_l = (intent or "").lower()
         target_l = (target or "").lower()
         is_close = intent_l in {"close_app", "close_application", "quit_app", "exit_app"} or "close_app" in target_l
-
         if is_close:
             victim = (resolved_name or target_name or "").lower()
             self.open_apps = [a for a in self.open_apps if a.lower() != victim]
             if self.last_referenced_app and self.last_referenced_app.lower() == victim:
                 self.last_referenced_app = None
                 self.last_referenced_app_hint = None
+                self.reference_turn = -1
         elif concrete:
             if concrete not in self.open_apps:
                 self.open_apps.append(concrete)
             self.last_referenced_app = concrete
             self.last_referenced_app_hint = concrete
+            self.reference_turn = self.turn_id
 
     def note_referenced_app(self, process_name: str, hint: str = ""):
         self.last_referenced_app = process_name
         self.last_referenced_app_hint = hint or process_name
+        self.reference_turn = self.turn_id
 
     def snapshot(self) -> Dict[str, Any]:
         return {
@@ -54,6 +70,7 @@ class AgentState:
             "last_intent": self.last_intent,
             "last_referenced_app": self.last_referenced_app,
             "last_referenced_app_hint": self.last_referenced_app_hint,
+            "reference_age_turns": self.turn_id - self.reference_turn if self.reference_turn >= 0 else None,
             "open_apps": list(self.open_apps),
             "computer_state": self.computer_state,
             "learned_context": self.learned_context,
