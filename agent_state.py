@@ -1,10 +1,4 @@
-"""Canonical agent state for active tasks, references, and computer context.
-
-The state is intentionally small and explicit: it stores only short-lived
-context needed to resolve follow-up references and current system facts.
-Persistent learning remains the responsibility of memory.py and later
-consolidation passes.
-"""
+"""Canonical agent state for active tasks, references, and computer context."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -15,15 +9,17 @@ from typing import Any, Dict, List, Optional
 class AgentState:
     active_goal: Optional[str] = None
 
-    # Last successfully executed task.
+    # Last successfully executed task. target_name is the concrete entity
+    # when one exists (for dynamic app actions this is the resolved process),
+    # not merely the generic catalog label.
     last_target: Optional[str] = None
     last_target_name: Optional[str] = None
     last_intent: Optional[str] = None
 
     # Most recent concrete application/entity mentioned or discovered by a
     # diagnostic. This is deliberately separate from last_target: asking
-    # "is Spotify running?" executes a process-list diagnostic, but the next
-    # "close it" should refer to Spotify, not to the diagnostic itself.
+    # "is Spotify running?" executes list_processes, but the next "close it"
+    # should refer to Spotify, not to the diagnostic itself.
     last_referenced_app: Optional[str] = None
     last_referenced_app_hint: Optional[str] = None
 
@@ -31,12 +27,22 @@ class AgentState:
     computer_state: Dict[str, Any] = field(default_factory=dict)
     execution_state: str = "idle"
 
-    def note_successful_task(self, target: str, target_name: str, intent: str):
+    def note_successful_task(self, target: str, target_name: str, intent: str,
+                             resolved_name: Optional[str] = None):
+        concrete = resolved_name or target_name
         self.last_target = target
-        self.last_target_name = target_name
+        self.last_target_name = concrete
         self.last_intent = intent
-        if target_name and target_name not in self.open_apps:
-            self.open_apps.append(target_name)
+
+        intent_l = (intent or "").lower()
+        target_l = (target or "").lower()
+        is_close = intent_l in {"close_app", "close_application", "quit_app", "exit_app"} or "close_app" in target_l
+
+        if is_close:
+            victim = (resolved_name or target_name or "").lower()
+            self.open_apps = [a for a in self.open_apps if a.lower() != victim]
+        elif concrete and concrete not in self.open_apps:
+            self.open_apps.append(concrete)
 
     def note_referenced_app(self, process_name: str, hint: str = ""):
         self.last_referenced_app = process_name
