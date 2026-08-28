@@ -1,32 +1,20 @@
 requests>=2.31.0
 python-dotenv>=1.0.1
-scikit-learn>=1.5.0
 
-# --- optional: real local semantic Tier 2 (embeddings.py) -- catches
-# paraphrases TF-IDF Tier 2 can't. ~30MB model download on first run,
-# ONNX-based (no torch). Without it the app still runs fine; semantic Tier 2
-# just stays permanently "not available" and everything falls back a tier.
+# --- local semantic understanding ---
+# FastEmbed/BGE is the primary action and memory retrieval mechanism.
 fastembed>=0.3.0
 
-# --- optional: enables real launch verification (tool_router.py / verification.py) --
-# without it the app still runs, launches just aren't independently confirmed
+# --- optional: real launch verification and system awareness ---
 psutil>=5.9.0
 
-# --- optional, only needed for whichever LLM_PROVIDER(s) you actually use ---
+# --- optional cloud provider SDKs (not used in local-only test mode) ---
 huggingface_hub>=0.34.0
 
-# --- optional, only needed for --voice mode ---
+# --- optional voice ---
 SpeechRecognition>=3.10.0
 PyAudio>=0.2.14
 pyttsx3>=2.90
-
-# --- optional, upgrades --voice mode's TTS to streaming neural speech ---
-# (spec sections 42-43). Also requires the ffmpeg BINARY on PATH separately
-# -- it's not pip-installable, so `pip install` alone won't give you this
-# path; voice.py detects its absence and falls back to pyttsx3 above
-# automatically, it just won't stream/sound as good until ffmpeg is
-# installed (e.g. `winget install ffmpeg` on Windows, or download a build
-# and add it to PATH).
 edge-tts>=6.1.0
 sounddevice>=0.4.6
 numpy>=1.26.0
