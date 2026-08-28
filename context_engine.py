@@ -1,4 +1,10 @@
-"""Context engine: deterministic references -> lexical -> semantic -> LLM."""
+"""Context engine: deterministic references -> lexical -> semantic -> LLM.
+
+The LLM tier receives a compact live-agent context envelope in addition to
+ConversationState. This keeps conversational continuity grounded in both the
+recent dialogue and the assistant's current task/computer state without
+making the LLM responsible for reconstructing state from raw diagnostics.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -29,6 +35,36 @@ def _group_for_action(groups: Dict[str, ActionGroup], action: str):
     return None
 
 
+def _compact_agent_context(state: AgentState, memory: UnifiedMemory) -> Dict[str, Any]:
+    """Build a small, LLM-friendly context envelope.
+
+    Keep this deliberately compact: the detailed episodic log remains on
+    disk, while the reasoning model gets only the facts useful for the next
+    conversational turn. This makes references such as "what we were doing"
+    and "the app I just checked" much more reliable without flooding the
+    prompt with historical events.
+    """
+    recent = []
+    for ep in memory.episodes[-8:]:
+        recent.append({
+            "event": ep.event_type,
+            "target": ep.target_name or ep.target,
+            "intent": ep.intent,
+            "success": ep.success,
+        })
+
+    return {
+        "active_goal": state.active_goal,
+        "last_successful_target": state.last_target_name,
+        "last_successful_intent": state.last_intent,
+        "last_referenced_app": state.last_referenced_app,
+        "last_referenced_app_hint": state.last_referenced_app_hint,
+        "open_apps": state.open_apps[-12:],
+        "computer_state": state.computer_state,
+        "recent_events": recent,
+    }
+
+
 def route(user_text: str, candidates: List[Dict], state: AgentState, memory: UnifiedMemory,
           groups: Dict[str, ActionGroup], assistant_name: Optional[str] = None,
           broad_search: bool = False, semantic_index=None) -> RoutedResult:
@@ -37,9 +73,6 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
     tier1 = reference_resolver.resolve(user_text, state)
     if tier1.resolved:
         target = tier1.target
-        # Some deterministic references identify an operation rather than a
-        # dataset target. Resolve that operation against the real action
-        # catalog so the rest of the executor remains unchanged.
         if not target and tier1.action_hint:
             group = _group_for_action(groups, tier1.action_hint)
             if group:
@@ -85,6 +118,10 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
                 "confidence": t2_semantic.confidence, "reason": t2_semantic.reason,
             })
 
+    # Give Tier 3 the current agent state and a compact episodic tail through
+    # the existing UnifiedMemory/ConversationState envelope. We overwrite the
+    # ephemeral slot each turn; it is not persisted as a user preference.
+    memory.conversation.slots["live_agent_context"] = _compact_agent_context(state, memory)
     result = llm_resolve(user_text, candidates, assistant_name, broad_search, memory.conversation)
     return RoutedResult(result, "tier3", {
         "raw": result.raw, "tier1_reason": tier1.reason, "tier2_lexical_reason": t2.reason,
