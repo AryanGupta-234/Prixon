@@ -140,16 +140,17 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
     memory.record_event("task_started", intent=result.intent, target=result.match_target,
                         target_name=group.target_name, parameters=result.parameters)
 
+    resolved_process = None
     if (group.action or "").lower() == "close_app_dynamic":
         hint = result.parameters.get("app_name_hint") or tier2.extract_app_name_hint(user_text) or group.target_name
-        resolved = tools.find_running_app(hint)
-        if not resolved:
+        resolved_process = tools.find_running_app(hint)
+        if not resolved_process:
             say(f"I don't see anything matching '{hint}' currently running.", use_voice)
             memory.record_event("task_failed", intent=result.intent, target=result.match_target,
                                 target_name=group.target_name, success=False)
             return
-        result.parameters = {**result.parameters, "resolved_process": resolved, "app_name_hint": hint}
-        result.reply = f"Found {resolved} running."
+        result.parameters = {**result.parameters, "resolved_process": resolved_process, "app_name_hint": hint}
+        result.reply = f"Found {resolved_process} running."
 
     if executor.needs_confirmation(group.risk):
         if (group.action or "").lower() == "close_app_dynamic":
@@ -179,14 +180,15 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
         return
 
     verified_ok = dispatched.ok and (v is None or v.confirmed is not False)
-    state.note_successful_task(result.match_target, group.target_name, result.intent)
+    concrete_name = resolved_process or group.target_name
+    state.note_successful_task(result.match_target, concrete_name, result.intent, resolved_name=resolved_process)
     if verified_ok:
         state.active_goal = goal_engine.topic_for_group(group)
         _trace("GOAL", state.active_goal)
     memory.record_event("task_completed", intent=result.intent, target=result.match_target,
-                        target_name=group.target_name, success=verified_ok,
+                        target_name=concrete_name, success=verified_ok,
                         parameters={**result.parameters, "verification": v.to_dict() if v else None})
-    memory.remember_turn(user_text, result, group.target_name)
+    memory.remember_turn(user_text, result, concrete_name)
     _trace("MEMORY", "episode stored")
 
     if v and v.verified and v.confirmed is False:
