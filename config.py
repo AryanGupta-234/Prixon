@@ -13,10 +13,15 @@ ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Jarvis")
 DEBUG = False
 WAKE_WORD = os.getenv("WAKE_WORD", "").strip().lower()
 
-# Local-only test mode. Keep cloud providers configured for later, but do not
-# instantiate or call them while this is enabled.
-CLOUD_LLM_ENABLED = os.getenv("CLOUD_LLM_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
+# Local-only development gate. While enabled, cloud providers are disabled
+# even if an old .env contains CLOUD_LLM_ENABLED=true. This prevents stale
+# configuration from silently re-enabling paid/quota-bound providers.
+LOCAL_ONLY_MODE = os.getenv("PRIXON_LOCAL_ONLY", "true").strip().lower() in {"1", "true", "yes", "on"}
+CLOUD_LLM_ENABLED = (
+    False if LOCAL_ONLY_MODE else
+    os.getenv("CLOUD_LLM_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+)
+LLM_PROVIDER = "ollama" if LOCAL_ONLY_MODE else os.getenv("LLM_PROVIDER", "ollama").strip().lower()
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip()
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct").strip()
@@ -36,7 +41,7 @@ CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-PROVIDER_FALLBACK_ORDER = ["local", "cerebras", "groq", "huggingface"]
+PROVIDER_FALLBACK_ORDER = ["local"] if LOCAL_ONLY_MODE else ["local", "cerebras", "groq", "huggingface"]
 
 MIN_AVAILABLE_RAM_MB_FOR_LOCAL = int(os.getenv("MIN_AVAILABLE_RAM_MB_FOR_LOCAL", "2500"))
 MAX_CPU_PERCENT_FOR_LOCAL = float(os.getenv("MAX_CPU_PERCENT_FOR_LOCAL", "90"))
@@ -55,8 +60,6 @@ DATA_PATH = os.getenv("ASSISTANT_DATA_PATH", "").strip() or os.path.join(
 )
 
 TOP_K_CANDIDATES = int(os.getenv("TOP_K_CANDIDATES", "10"))
-# Legacy lexical retrieval is intentionally disabled during the semantic-router
-# migration. Set true only for regression comparison/debugging.
 LEGACY_LEXICAL_FALLBACK = os.getenv("LEGACY_LEXICAL_FALLBACK", "false").strip().lower() in {"1", "true", "yes", "on"}
 MIN_TFIDF_SCORE = float(os.getenv("MIN_TFIDF_SCORE", "0.03"))
 CONFIRM_RISK_LEVELS = {"medium", "high"}
