@@ -64,13 +64,13 @@ DATA_PATH = os.getenv("ASSISTANT_DATA_PATH", "").strip() or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "data", "windows_automation_10000.jsonl"
 )
 
-TOP_K_CANDIDATES = int(os.getenv("TOP_K_CANDIDATES", "10"))
+TOP_K_CANDIDATES = int(os.getenv("TOP_K_CANDIDATES", "6"))
 LEGACY_LEXICAL_FALLBACK = os.getenv("LEGACY_LEXICAL_FALLBACK", "false").strip().lower() in {"1", "true", "yes", "on"}
 MIN_TFIDF_SCORE = float(os.getenv("MIN_TFIDF_SCORE", "0.03"))
 CONFIRM_RISK_LEVELS = {"medium", "high"}
 MIN_NLU_CONFIDENCE = os.getenv("MIN_NLU_CONFIDENCE", "medium").lower()
-CONTEXT_TURNS = int(os.getenv("CONTEXT_TURNS", "8"))
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "400"))
+CONTEXT_TURNS = int(os.getenv("CONTEXT_TURNS", "4"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "180"))
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.15"))
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")

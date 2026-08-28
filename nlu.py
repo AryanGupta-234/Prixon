@@ -151,7 +151,7 @@ def _candidate_view(candidates: List[Dict], broad: bool = False) -> List[Dict]:
         {
             "target": c.get("target"), "name": c.get("target_name"), "intent": c.get("intent"),
             "action": c.get("action"), "risk": c.get("risk", "low"),
-            "retrieval_score": c.get("score", 0), "examples": c.get("examples", [])[:4],
+            "retrieval_score": c.get("score", 0), "examples": c.get("examples", [])[:2],
         }
         for c in candidates
     ]

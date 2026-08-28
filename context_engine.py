@@ -45,15 +45,15 @@ def _snapshot_context(snapshot) -> Dict[str, Any]:
         "network": {"online": snapshot.network.online},
         "battery": {"present": snapshot.battery.present, "percent": snapshot.battery.percent, "charging": snapshot.battery.charging},
         "gpu": {"available": snapshot.gpu.available, "utilization_percent": snapshot.gpu.utilization_percent, "vram_used_mb": snapshot.gpu.vram_used_mb, "vram_total_mb": snapshot.gpu.vram_total_mb},
-        "top_cpu": [{"name": p.name, "pid": p.pid, "cpu_percent": p.cpu_percent} for p in snapshot.processes.top_by_cpu[:5]],
-        "top_memory": [{"name": p.name, "pid": p.pid, "memory_mb": p.memory_mb} for p in snapshot.processes.top_by_memory[:5]],
+        "top_cpu": [{"name": p.name, "pid": p.pid, "cpu_percent": p.cpu_percent} for p in snapshot.processes.top_by_cpu[:3]],
+        "top_memory": [{"name": p.name, "pid": p.pid, "memory_mb": p.memory_mb} for p in snapshot.processes.top_by_memory[:3]],
     }
 
 
 def _compact_agent_context(state: AgentState, memory: UnifiedMemory, patterns=None) -> Dict[str, Any]:
     snapshot = system_agent.latest_snapshot()
     state.computer_state = _snapshot_context(snapshot)
-    recent = [{"event": ep.event_type, "target": ep.target_name or ep.target, "intent": ep.intent, "success": ep.success} for ep in memory.episodes[-8:]]
+    recent = [{"event": ep.event_type, "target": ep.target_name or ep.target, "intent": ep.intent, "success": ep.success} for ep in memory.episodes[-3:]]
     learned = patterns.context() if patterns is not None else {}
     return {
         "active_goal": state.active_goal,
