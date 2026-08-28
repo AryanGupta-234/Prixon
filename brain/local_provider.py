@@ -1,14 +1,7 @@
-"""Local LLMProvider via Ollama (spec section 5).
-
-Scoped narrowly for this slice: a working local chat path behind the same
-LLMProvider interface as the cloud providers, so brain/router.py can start
-treating "local" as a real chain member. Resource-awareness (RAM/CPU/GPU
-checks before deciding to use it -- spec section 9) is Slice 2's job, not
-this one; `available()` here only checks that an Ollama server is actually
-reachable, not whether the machine currently has headroom to run it well.
-"""
+"""Local LLMProvider via Ollama with live availability checks."""
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 import config
@@ -22,25 +15,39 @@ class OllamaProvider(LLMProvider):
         self.base_url = (base_url or config.OLLAMA_BASE_URL).rstrip("/")
         self.model = model or config.OLLAMA_MODEL
         self._checked_available: Optional[bool] = None
+        self._checked_at = 0.0
+        self._availability_ttl = 5.0
 
     def available(self) -> bool:
-        """A short-timeout ping to Ollama's own /api/tags endpoint -- cheap
-        enough to call once per provider-chain build, unlike actually
-        loading a model. Cached per-instance so a dead server during one
-        session doesn't get re-probed on every single turn; router.py
-        creates a fresh provider chain per process anyway, so this resets
-        naturally on restart."""
-        if self._checked_available is not None:
+        """Check that Ollama is reachable *and the configured model exists*.
+
+        Availability is intentionally short-lived. Ollama may start/stop or
+        a model may be pulled while Prixon is already running, so a permanent
+        per-process negative cache is incorrect for an agent living in a
+        changing environment.
+        """
+        now = time.monotonic()
+        if self._checked_available is not None and now - self._checked_at < self._availability_ttl:
             return self._checked_available
         if not self.model:
             self._checked_available = False
+            self._checked_at = now
             return False
         try:
             import requests
             resp = requests.get(f"{self.base_url}/api/tags", timeout=1.5)
-            self._checked_available = resp.status_code == 200
+            if resp.status_code != 200:
+                ok = False
+            else:
+                models = resp.json().get("models", [])
+                names = {str(m.get("name", "")) for m in models}
+                ok = self.model in names or any(
+                    name.split(":", 1)[0] == self.model.split(":", 1)[0] for name in names
+                )
+            self._checked_available = ok
         except Exception:
             self._checked_available = False
+        self._checked_at = now
         return self._checked_available
 
     def chat(self, system_prompt: str, user_message: str, *, max_tokens: int, temperature: float) -> str:
@@ -56,20 +63,20 @@ class OllamaProvider(LLMProvider):
                 "stream": False,
                 "options": {"temperature": temperature, "num_predict": max_tokens},
             },
-            timeout=60,  # local inference on a laptop CPU can be slow -- generous vs. the 30s cloud timeout
+            timeout=config.OLLAMA_TIMEOUT_SECONDS,
         )
         if resp.status_code >= 400:
             raise RuntimeError(f"{resp.status_code}: {resp.text[:300]}")
         data = resp.json()
-        return (data.get("message") or {}).get("content") or ""
+        text = (data.get("message") or {}).get("content") or ""
+        if not text.strip():
+            raise RuntimeError("Ollama returned an empty model response")
+        return text
 
     def classify_error(self, exc: Exception) -> str:
-        # A local server that's simply not running/reachable is neither a
-        # quota nor an auth problem -- router.py should just skip to the
-        # next provider without remembering this as "exhausted for the
-        # session" the way a cloud quota hit is remembered, since the local
-        # server could come back at any time.
         msg = str(exc).lower()
-        if "connection" in msg or "timeout" in msg or "timed out" in msg:
+        if any(x in msg for x in ("connection", "timeout", "timed out", "connectex", "refused")):
+            return "unsupported"
+        if "not found" in msg or "model" in msg and "pull" in msg:
             return "unsupported"
         return super().classify_error(exc)
