@@ -1,6 +1,7 @@
 """Tier 2: cheap local intent classification and entity extraction."""
 from __future__ import annotations
 
+import difflib
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -68,21 +69,10 @@ def extract_entities(text: str) -> Dict[str, Any]:
 _CLOSE_VERBS_RE = re.compile(r"\b(close|quit|exit|kill|terminate|shut\s*down|stop)\b\s+(.*)", re.I)
 _RUNNING_RE = re.compile(
     r"\b(?:is|are|does)\s+(?P<app>.+?)\s+(?:still\s+|currently\s+)?(?:running|open|active)\b|"
-    # "check/chk/see/tell me if/whether X is/are running" AND the shorter
-    # "check/chk if X running" (no is/are) that natural typing drops.
     r"\b(?:check|chk|see|tell\s+me)\s+(?:if|whether)\s+(?P<app2>.+?)\s+(?:(?:is|are)\s+)?(?:still\s+|currently\s+)?(?:running|open|active)\b|"
     r"\b(?:check|chk|see|tell\s+me)\s+(?:for)\s+(?P<app3>.+?)\s+(?:running|open|active)\b",
     re.I,
 )
-# Bare "spotify running?" / "spotify open?" -- deliberately a SEPARATE,
-# stricter pass rather than folded into _RUNNING_RE. An earlier version
-# anchored this at ^ inside the same alternation, but because Python tries
-# alternatives left-to-right at each start position, the permissive bare
-# branch matched at position 0 before the verb-anchored branches got a
-# chance to match later in the string -- e.g. "can u chk if spotify running"
-# wrongly captured "chk if spotify" as the app name instead of matching the
-# check/chk branch on "spotify". Trying this only after _RUNNING_RE fails,
-# and only against short question-like text, avoids that.
 _BARE_RUNNING_RE = re.compile(r"^(?P<app>[a-z0-9 ]+?)\s+(?:still\s+|currently\s+)?(?:running|open|active)\s*\??$", re.I)
 _BARE_STOPWORDS = {
     "if", "whether", "chk", "check", "see", "tell", "does", "is", "are", "can", "could",
@@ -94,6 +84,20 @@ _APP_NAME_FILLER_WORDS = {
     "still", "currently", "also",
 }
 
+# Generic typo tolerance for the *intent vocabulary*, not application names.
+# This lets "runung", "runnig", etc. resolve to "running" without creating
+# an app-specific synonym table or guessing arbitrary entity names.
+_RUNTIME_TERMS = ("running", "open", "active")
+def _normalize_runtime_terms(text: str) -> str:
+    def repl(match):
+        word = match.group(0)
+        if len(word) < 4:
+            return word
+        best = max(_RUNTIME_TERMS, key=lambda x: difflib.SequenceMatcher(None, word.lower(), x).ratio())
+        ratio = difflib.SequenceMatcher(None, word.lower(), best).ratio()
+        return best if ratio >= 0.72 else word
+    return re.sub(r"\b[a-zA-Z]+\b", repl, text)
+
 def extract_app_name_hint(text: str) -> Optional[str]:
     m = _CLOSE_VERBS_RE.search(text)
     if not m:
@@ -101,17 +105,13 @@ def extract_app_name_hint(text: str) -> Optional[str]:
     return _clean_app_hint(m.group(2))
 
 def extract_running_app_hint(text: str) -> Optional[str]:
-    stripped = text.strip()
+    stripped = _normalize_runtime_terms(text.strip())
     m = _RUNNING_RE.search(stripped)
     if m:
         return _clean_app_hint(m.group("app") or m.group("app2") or m.group("app3"))
     m = _BARE_RUNNING_RE.match(stripped)
     if m:
         words = m.group("app").lower().split()
-        # A genuine bare app-status query is short and has no leftover verb
-        # words -- if any showed up, the sentence needed the verb-anchored
-        # patterns above and just didn't match one of their forms; don't
-        # guess by swallowing the whole sentence as an "app name".
         if 1 <= len(words) <= 4 and not (set(words) & _BARE_STOPWORDS):
             return _clean_app_hint(m.group("app"))
     return None
