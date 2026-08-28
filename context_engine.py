@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+import config
 import goal_engine
 import reference_resolver
 import tier2
@@ -70,7 +71,7 @@ def _compact_agent_context(state: AgentState, memory: UnifiedMemory, patterns=No
 
 
 def _live_app_status(user_text: str, state: AgentState) -> Optional[RoutedResult]:
-    """Answer named application status from the live Windows process state."""
+    """Answer named application status from live Windows process state."""
     hint = tier2.extract_running_app_hint(user_text)
     if not hint:
         return None
