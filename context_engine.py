@@ -1,10 +1,4 @@
-"""Context engine: routes a request through Tier 1 -> Tier 2 -> Tier 3,
-returning the first one that resolves it, and applies goal-topic bias to
-candidates before any of them see them.
-
-This is the one seam main.py talks to. Later phases (a real local Tier 2
-model, a multi-step planner) hook in here without main.py changing again.
-"""
+"""Context engine: deterministic references -> lexical -> semantic -> LLM."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,8 +17,16 @@ from nlu import resolve as llm_resolve
 @dataclass
 class RoutedResult:
     result: NLUResult
-    tier: str  # "tier1" | "tier2" | "tier3"
+    tier: str
     debug: Dict[str, Any]
+
+
+def _group_for_action(groups: Dict[str, ActionGroup], action: str):
+    wanted = (action or "").lower()
+    for group in groups.values():
+        if (group.action or "").lower() == wanted:
+            return group
+    return None
 
 
 def route(user_text: str, candidates: List[Dict], state: AgentState, memory: UnifiedMemory,
@@ -34,14 +36,28 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
 
     tier1 = reference_resolver.resolve(user_text, state)
     if tier1.resolved:
-        result = NLUResult(
-            match_target=tier1.target, confidence="high", reply="On it.",
-            intent=tier1.intent or "unknown", parameters={}, reference=tier1.reference,
-            raw={"tier1_reason": tier1.reason},
-        )
-        return RoutedResult(result, "tier1", {
-            "reference": tier1.reference, "confidence": tier1.confidence, "reason": tier1.reason,
-        })
+        target = tier1.target
+        # Some deterministic references identify an operation rather than a
+        # dataset target. Resolve that operation against the real action
+        # catalog so the rest of the executor remains unchanged.
+        if not target and tier1.action_hint:
+            group = _group_for_action(groups, tier1.action_hint)
+            if group:
+                target = group.target
+        if target:
+            return RoutedResult(
+                NLUResult(
+                    match_target=target, confidence="high", reply="On it.",
+                    intent=tier1.intent or "unknown", parameters={
+                        "app_name_hint": tier1.target_name
+                    } if tier1.action_hint == "close_app_dynamic" else {},
+                    reference=tier1.reference,
+                    raw={"tier1_reason": tier1.reason},
+                ),
+                "tier1",
+                {"reference": tier1.reference, "confidence": tier1.confidence,
+                 "reason": tier1.reason},
+            )
 
     t2 = tier2.classify(user_text, candidates)
     if t2.resolved:
@@ -54,10 +70,6 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
             "tier1_reason": tier1.reason, "confidence": t2.confidence, "reason": t2.reason,
         })
 
-    # Semantic Tier 2: catches paraphrases lexical Tier 2 can't. Only runs
-    # (has any effect) once embeddings.SemanticIndex finishes loading in its
-    # background thread -- before that, .search() returns [] and this is a
-    # no-op, exactly like semantic_index=None.
     t2_semantic = tier2.Tier2Result(False, reason="semantic index not available")
     if semantic_index is not None and semantic_index.ready:
         semantic_candidates = semantic_index.search(user_text)
