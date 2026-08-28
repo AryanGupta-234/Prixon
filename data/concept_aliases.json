@@ -1,0 +1,61 @@
+{
+  "display": {
+    "synonyms": [
+      "screen",
+      "display",
+      "monitor",
+      "brightness"
+    ],
+    "antonyms": [
+      "dark",
+      "dim"
+    ]
+  },
+  "audio": {
+    "synonyms": [
+      "sound",
+      "audio",
+      "volume",
+      "speaker",
+      "mute"
+    ],
+    "antonyms": [
+      "quiet",
+      "silent"
+    ]
+  },
+  "network": {
+    "synonyms": [
+      "wifi",
+      "wireless",
+      "internet",
+      "network",
+      "connection"
+    ],
+    "antonyms": [
+      "offline",
+      "disconnected"
+    ]
+  },
+  "application": {
+    "synonyms": [
+      "app",
+      "program",
+      "application",
+      "process",
+      "software"
+    ],
+    "antonyms": []
+  },
+  "power": {
+    "synonyms": [
+      "battery",
+      "charge",
+      "power"
+    ],
+    "antonyms": [
+      "dead",
+      "drained"
+    ]
+  }
+}

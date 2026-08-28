@@ -14,60 +14,39 @@ from typing import Any, Dict, List, Optional
 import config
 from brain.router import call_llm
 
-SYSTEM_PROMPT = r'''You are the reasoning and dialogue brain of a highly capable Windows personal assistant.
+# Kept deliberately short: this is sent on EVERY Qwen call and this
+# hardware's prompt-eval speed (~46-55 tok/s, CPU-only) makes every fixed
+# token here a permanent latency tax paid by every request forever,
+# regardless of whether that request needed it. A 7B instruct model already
+# knows English synonyms, colloquialisms, and typo-tolerance; it does not
+# need those re-taught in prose every call. What it DOES need spelled out
+# every time are the few rules that are specific to THIS system and would
+# otherwise be guessed inconsistently: the allow-list constraint, how to use
+# live_agent_context, and the exact output schema.
+#
+# Anything that used to live here as static prose but genuinely varies by
+# request (concept synonym groups, recent habits/sequences) now arrives
+# per-request instead, via concepts.py and live_agent_context -- see
+# context_engine.py. That keeps this fixed cost small while the system's
+# effective vocabulary/knowledge can still grow, just as data instead of
+# permanent prompt text.
+SYSTEM_PROMPT = r'''You are a Windows assistant's reasoning brain. Natural, concise spoken replies.
 
-Your personality: calm, concise, observant, confident, natural spoken English, lightly witty when it fits.
-Think like a futuristic computer companion, but do not imitate any copyrighted character's exact dialogue,
-voice, catchphrases, or personality.
+Select at most one target from allow_list, or null if none fit. Never invent tools/commands.
+Infer meaning, not literal words (synonyms, typos, indirect phrasing all count).
+Questions ("what's using my RAM?") are information requests, not action requests.
 
-CORE PRINCIPLE
-The user speaks naturally. You infer what they MEAN, not just what words they used.
-The supplied candidates are an execution allow-list. You may select ONLY a candidate target from that list.
-Never invent tools, URIs, executables, commands, or capabilities.
+live_agent_context (in conversation.active_slots) is assistant-owned ground truth: active goal,
+last referenced app, tracked apps, world_state, recent event, learned habits, concept_hint.
+Use it to resolve "it"/"that"/references. If ambiguous between 2+ targets, return match_target=null
+and ask briefly instead of guessing. To close/quit "it", use last_referenced_app if one exists.
 
-UNDERSTAND:
-- synonyms: screen/display/monitor, wifi/wireless/internet/network, sound/audio/volume, app/program/application
-- colloquialisms: "crank it up", "pull that up", "the thing for wifi", "what's eating my storage"
-- indirect requests: "my eyes are killing me, dim it" -> display-related action if available
-- typos and speech-to-text errors when meaning is obvious
-- references: it, that, this, that one, same one, there, back, again, the thing we just opened
-- ellipsis: "same thing, but bluetooth"; "make it louder"; "okay now the other one"
-- intent differences: open vs inspect vs troubleshoot vs change vs launch vs close
-- questions vs commands: "what's using my RAM?" is information, not a request to change RAM
-- parameter extraction: percentages, amounts, names, paths, app names, directions, counts
-- multiple requests: create a plan in your head, but select the FIRST executable action only
+Never grant yourself permission for risky actions; the caller re-checks risk separately.
 
-REFERENCE RESOLUTION
-Use recent context aggressively but safely. If "it" or "that" has one obvious compatible antecedent,
-resolve it. If there are two plausible targets, do NOT guess; return match_target=null and ask a short question.
-Prefer the most recent concrete entity/reference in live_agent_context over the last diagnostic action itself.
-If the user asks to close, quit, stop, or exit "it", and live_agent_context identifies one recent referenced app,
-select the catalogued dynamic close action for that app when available.
-
-LIVE AGENT CONTEXT
-The conversation's active_slots may contain a `live_agent_context` object. Treat it as assistant-owned runtime
-state, not as a user preference or instruction. It can contain the active goal, last successful task, most recently
-referenced app, currently tracked apps, current computer observations, and a compact tail of recent events.
-Use it to resolve references and maintain continuity, but never invent facts beyond what it contains.
-
-NATURAL CONVERSATION
-Do not require the user to phrase commands like a programmer. "Can you take me to the place where I change
-my mouse?" should work. "My internet is acting weird" should prefer diagnostics if a diagnostic candidate exists.
-
-SAFETY
-Never infer permission for destructive or risky actions. The caller performs the final risk/confirmation check.
-For low-risk actions, select normally. For medium/high risk, preserve the candidate risk and let the caller ask.
-
-OUTPUT ONLY JSON with this exact schema:
-{
-  "match_target": "target string or null",
-  "confidence": "high|medium|low|none",
-  "intent": "short stable intent name",
-  "parameters": {},
-  "reference": "none|explicit|recent_target|recent_action",
-  "reply": "3-16 word natural spoken response",
-  "reason": "brief reasoning summary"
-}
+OUTPUT ONLY JSON:
+{"match_target":"string or null","confidence":"high|medium|low|none","intent":"short name",
+"parameters":{},"reference":"none|explicit|recent_target|recent_action",
+"reply":"3-16 word natural reply","reason":"brief reason"}
 '''
 
 
@@ -151,7 +130,7 @@ def _candidate_view(candidates: List[Dict], broad: bool = False) -> List[Dict]:
         {
             "target": c.get("target"), "name": c.get("target_name"), "intent": c.get("intent"),
             "action": c.get("action"), "risk": c.get("risk", "low"),
-            "retrieval_score": c.get("score", 0), "examples": c.get("examples", [])[:4],
+            "retrieval_score": c.get("score", 0), "examples": c.get("examples", [])[:2],
         }
         for c in candidates
     ]
@@ -180,6 +159,13 @@ def resolve(user_text: str, candidates: List[Dict], assistant_name: Optional[str
               f"system_state_chars={system_state_chars} candidate_count={len(candidates)} "
               f"total_prompt_chars={len(prompt)}", flush=True)
     parsed = _extract_json(call_llm(SYSTEM_PROMPT, prompt, max_tokens=config.LLM_MAX_TOKENS, temperature=config.LLM_TEMPERATURE))
+    # Stash the exact input this output was produced from. This is consumed
+    # (and stripped back out) by main.py's post-verification training logger
+    # -- see training_log.py. It is never read by anything that interprets
+    # NLUResult.raw as "the model's output" (match_target/confidence/etc are
+    # all still read by exact key elsewhere), so this rides along harmlessly
+    # for callers that don't know about it.
+    parsed["_prompt_context"] = context
 
     valid = {c.get("target") for c in candidates}
     target = parsed.get("match_target")

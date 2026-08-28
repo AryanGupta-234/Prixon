@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+import concepts
 import config
 import goal_engine
 import reference_resolver
@@ -34,40 +35,66 @@ def _group_for_action(groups: Dict[str, ActionGroup], action: str):
 
 
 def _snapshot_context(snapshot) -> Dict[str, Any]:
+    """Only the fields Qwen actually reasons about. Previously this always
+    included the full GPU block (even when there's no GPU, i.e. most of the
+    time) and 3+3 top-process lists on every single call. Zero-value/absent
+    blocks are now omitted entirely rather than shipped as empty structure --
+    that structure costs real prompt-eval tokens for information that isn't
+    there."""
     if snapshot is None:
         return {"available": False}
-    return {
+    out: Dict[str, Any] = {
         "available": True,
-        "age_seconds": round(max(0.0, time.time() - snapshot.timestamp), 1),
-        "cpu": {"usage_percent": snapshot.cpu.usage_percent, "cores": snapshot.cpu.core_count, "frequency_mhz": snapshot.cpu.frequency_mhz},
-        "memory": {"percent": snapshot.memory.percent, "available_mb": snapshot.memory.available_mb, "used_mb": snapshot.memory.used_mb, "total_mb": snapshot.memory.total_mb},
-        "disk": {"free_gb": snapshot.disk.free_gb, "used_percent": snapshot.disk.used_percent},
-        "network": {"online": snapshot.network.online},
-        "battery": {"present": snapshot.battery.present, "percent": snapshot.battery.percent, "charging": snapshot.battery.charging},
-        "gpu": {"available": snapshot.gpu.available, "utilization_percent": snapshot.gpu.utilization_percent, "vram_used_mb": snapshot.gpu.vram_used_mb, "vram_total_mb": snapshot.gpu.vram_total_mb},
-        "top_cpu": [{"name": p.name, "pid": p.pid, "cpu_percent": p.cpu_percent} for p in snapshot.processes.top_by_cpu[:5]],
-        "top_memory": [{"name": p.name, "pid": p.pid, "memory_mb": p.memory_mb} for p in snapshot.processes.top_by_memory[:5]],
+        "cpu_percent": snapshot.cpu.usage_percent,
+        "memory_percent": snapshot.memory.percent,
+        "disk_free_gb": snapshot.disk.free_gb,
+        "network_online": snapshot.network.online,
     }
+    if snapshot.battery.present:
+        out["battery_percent"] = snapshot.battery.percent
+        out["battery_charging"] = snapshot.battery.charging
+    if snapshot.gpu.available:
+        out["gpu_percent"] = snapshot.gpu.utilization_percent
+    # Top processes are only relevant to "what's using my X" style
+    # questions, which are answered by the environment-first path (Section
+    # 9) before Qwen is ever called -- so Qwen itself rarely needs this.
+    # Keep exactly one entry as a lightweight situational cue rather than
+    # dropping it completely, instead of the previous 3+3.
+    if snapshot.processes.top_by_cpu:
+        top = snapshot.processes.top_by_cpu[0]
+        out["top_cpu_process"] = {"name": top.name, "cpu_percent": top.cpu_percent}
+    return out
 
 
-def _compact_agent_context(state: AgentState, memory: UnifiedMemory, patterns=None) -> Dict[str, Any]:
+def _compact_agent_context(state: AgentState, memory: UnifiedMemory, patterns=None, user_text: str = "") -> Dict[str, Any]:
     snapshot = system_agent.latest_snapshot()
     state.computer_state = _snapshot_context(snapshot)
-    recent = [{"event": ep.event_type, "target": ep.target_name or ep.target, "intent": ep.intent, "success": ep.success} for ep in memory.episodes[-8:]]
+    # Only the single most recent episode, and only when it exists -- Qwen
+    # needs "what just happened", not a rolling log; CONTEXT_TURNS already
+    # covers multi-turn conversational continuity separately.
+    recent_episodes = memory.episodes[-1:]
     learned = patterns.context() if patterns is not None else {}
-    return {
-        "active_goal": state.active_goal,
-        "last_successful_target": state.last_target_name,
-        "last_successful_intent": state.last_intent,
-        "last_referenced_app": state.last_referenced_app,
-        "last_referenced_app_hint": state.last_referenced_app_hint,
-        "reference_age_turns": state.snapshot().get("reference_age_turns"),
-        "tracked_apps": state.open_apps[-12:],
-        "world_state": state.computer_state,
-        "learned_experience": state.learned_context,
-        "learned_patterns": learned,
-        "recent_events": recent,
-    }
+    out: Dict[str, Any] = {"world_state": state.computer_state}
+    if state.active_goal:
+        out["active_goal"] = state.active_goal
+    if state.last_referenced_app:
+        out["last_referenced_app"] = state.last_referenced_app
+        out["reference_age_turns"] = state.snapshot().get("reference_age_turns")
+    if state.open_apps:
+        out["tracked_apps"] = state.open_apps[-6:]
+    if recent_episodes:
+        ep = recent_episodes[0]
+        out["last_event"] = {"event": ep.event_type, "target": ep.target_name or ep.target, "success": ep.success}
+    reliable = (state.learned_context or {}).get("reliable_actions") or []
+    if reliable:
+        out["reliable_actions"] = reliable[:3]
+    habits = (learned or {}).get("habits") or []
+    if habits:
+        out["learned_habits"] = habits[:3]
+    concept_hint = concepts.relevant_hint(user_text)
+    if concept_hint:
+        out["concept_hint"] = concept_hint
+    return out
 
 
 def _live_app_status(user_text: str, state: AgentState) -> Optional[RoutedResult]:
@@ -116,11 +143,21 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
     # Embeddings are retrieval only. They narrow the capability space, but
     # NEVER execute a command by similarity alone. Qwen remains the semantic
     # arbiter and sees the live situation model plus this shortlist.
+    #
+    # NOTE: this used to read `max(config.TOP_K_CANDIDATES, 12)`, which meant
+    # tuning TOP_K_CANDIDATES down to 6 (see config.py) was a silent no-op --
+    # the floor of 12 always won. On real hardware this was worth ~350-400
+    # extra prompt tokens (2 examples x 6 extra candidates), which measurably
+    # matters on this CPU's ~46-55 tok/s prompt-eval speed. Use the tuned
+    # value directly; the query-expansion in concepts.py compensates for any
+    # recall lost from a smaller shortlist.
     semantic_ready = bool(semantic_index is not None and semantic_index.ready)
-    semantic_candidates = semantic_index.search(user_text, top_k=max(config.TOP_K_CANDIDATES, 12)) if semantic_ready else []
+    top_k = max(config.TOP_K_CANDIDATES, 1)
+    expanded_query = concepts.expand_query(user_text)
+    semantic_candidates = semantic_index.search(expanded_query, top_k=top_k) if semantic_ready else []
     if semantic_candidates:
         candidates = []
-        for item in semantic_candidates[:max(config.TOP_K_CANDIDATES, 12)]:
+        for item in semantic_candidates[:top_k]:
             group = groups.get(item.get("target"))
             if group:
                 candidates.append(group.to_candidate(item.get("score", 0.0)))
@@ -133,8 +170,8 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
     # Safety net: never let a caller-supplied candidate list (e.g. a future
     # full_catalog() use, or LEGACY_LEXICAL_FALLBACK) balloon the Qwen prompt.
     # This is what actually caused the 60s Ollama timeouts -- see main.py.
-    if len(candidates) > max(config.TOP_K_CANDIDATES, 12):
-        candidates = candidates[:max(config.TOP_K_CANDIDATES, 12)]
+    if len(candidates) > top_k:
+        candidates = candidates[:top_k]
 
     if not semantic_ready and semantic_index is not None and semantic_index.loading and not candidates:
         # Embeddings are still warming up in the background and we have no
@@ -149,7 +186,7 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
             "warmup", {"reason": "semantic index still loading, no candidates available"},
         )
 
-    memory.conversation.slots["live_agent_context"] = _compact_agent_context(state, memory, patterns)
+    memory.conversation.slots["live_agent_context"] = _compact_agent_context(state, memory, patterns, user_text)
     result = llm_resolve(user_text, candidates, assistant_name, broad_search, memory.conversation)
     return RoutedResult(result, "tier3-qwen-semantic", {
         "semantic_candidates": semantic_candidates[:5],

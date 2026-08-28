@@ -23,6 +23,7 @@ from agent_state import AgentState
 from brain.router import get_router
 from cognition.experience import ExperienceModel
 from cognition.patterns import PatternMemory
+from cognition import training_log
 from data_store import ActionIndex
 from embeddings import SemanticIndex
 from memory import UnifiedMemory
@@ -196,6 +197,7 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
     patterns.observe_action(concrete_name, result.intent, verified_ok)
     patterns.observe_transition(previous, concrete_name, verified_ok)
     state.learned_context = experience.context()
+    training_log.log_verified_interaction(user_text, routed.tier, result.raw, verified_ok)
     _trace("MEMORY", "episode + experience + patterns stored")
 
     if v and v.verified and v.confirmed is False:
