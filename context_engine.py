@@ -1,4 +1,4 @@
-"""Context engine: references -> live environment -> semantic -> grounded LLM reasoning."""
+"""Context engine: references -> live environment -> semantic shortlist -> Qwen."""
 from __future__ import annotations
 
 import time
@@ -98,6 +98,7 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
 
     candidates = goal_engine.bias_candidates(candidates, state.active_goal, groups)
 
+    # Explicit references are deterministic and should win over semantic similarity.
     tier1 = reference_resolver.resolve(user_text, state)
     if tier1.resolved:
         target = tier1.target
@@ -112,27 +113,24 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
                            reference=tier1.reference, raw={"tier1_reason": tier1.reason}),
                 "tier1", {"reference": tier1.reference, "confidence": tier1.confidence, "reason": tier1.reason})
 
-    # Semantic embeddings are now the primary retrieval mechanism. TF-IDF is
-    # deliberately not consulted in normal operation.
+    # Embeddings are retrieval only. They narrow the capability space, but
+    # NEVER execute a command by similarity alone. Qwen remains the semantic
+    # arbiter and sees the live situation model plus this shortlist.
     semantic_candidates = semantic_index.search(user_text, top_k=max(config.TOP_K_CANDIDATES, 12)) if semantic_index is not None and semantic_index.ready else []
     if semantic_candidates:
-        t2_semantic = tier2.classify_semantic(user_text, semantic_candidates, groups)
-        if t2_semantic.resolved:
-            result = NLUResult(match_target=t2_semantic.target, confidence="high", reply="On it.", intent=t2_semantic.intent or "unknown", parameters=t2_semantic.parameters or {}, reference="none", raw={"semantic_reason": t2_semantic.reason})
-            return RoutedResult(result, "tier2-semantic", {"semantic": semantic_candidates[:5], "confidence": t2_semantic.confidence, "reason": t2_semantic.reason})
         candidates = []
         for item in semantic_candidates[:max(config.TOP_K_CANDIDATES, 12)]:
             group = groups.get(item.get("target"))
             if group:
                 candidates.append(group.to_candidate(item.get("score", 0.0)))
     elif config.LEGACY_LEXICAL_FALLBACK:
-        t2 = tier2.classify(user_text, candidates)
-        if t2.resolved:
-            result = NLUResult(match_target=t2.target, confidence="high", reply="On it.", intent=t2.intent or "unknown", parameters=t2.parameters or {}, reference="none", raw={"legacy_lexical_reason": t2.reason})
-            return RoutedResult(result, "tier2-legacy-lexical", {"reason": t2.reason})
+        # Kept only for temporary A/B regression testing. Normal mode is off.
+        candidates = candidates
 
-    # Qwen is the semantic arbitrator when deterministic/reference/world
-    # reasoning cannot confidently resolve the request.
     memory.conversation.slots["live_agent_context"] = _compact_agent_context(state, memory, patterns)
     result = llm_resolve(user_text, candidates, assistant_name, broad_search, memory.conversation)
-    return RoutedResult(result, "tier3-semantic-brain", {"semantic_candidates": semantic_candidates[:5], "raw": result.raw})
+    return RoutedResult(result, "tier3-qwen-semantic", {
+        "semantic_candidates": semantic_candidates[:5],
+        "semantic_ready": bool(semantic_index is not None and semantic_index.ready),
+        "raw": result.raw,
+    })
