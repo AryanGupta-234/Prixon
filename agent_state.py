@@ -1,11 +1,9 @@
-"""Canonical agent state -- single source of truth for what Jarvis currently
-knows about the active task/goal and the computer.
+"""Canonical agent state for active tasks, references, and computer context.
 
-Every subsystem should read/write through this object rather than keeping
-its own parallel copy of "what's going on right now". Phase 1 keeps this
-intentionally small (only the fields Tier 1 reference resolution and the
-context envelope actually need); later phases extend it rather than
-replacing it, so nothing built on top of it has to be rewritten.
+The state is intentionally small and explicit: it stores only short-lived
+context needed to resolve follow-up references and current system facts.
+Persistent learning remains the responsibility of memory.py and later
+consolidation passes.
 """
 from __future__ import annotations
 
@@ -15,27 +13,23 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class AgentState:
-    # What the user is currently trying to accomplish, if anything durable.
     active_goal: Optional[str] = None
 
-    # Last successfully executed task -- this is what bare "it" / "that" /
-    # "again" resolve to when there's no more specific antecedent.
+    # Last successfully executed task.
     last_target: Optional[str] = None
     last_target_name: Optional[str] = None
     last_intent: Optional[str] = None
 
-    # Apps this session has launched, most-recently-launched last. (There is
-    # no close/kill tool in the current tool registry yet -- see README --
-    # so this is tracked now so a future close_app tool has something to
-    # resolve "close it" against without another state-layer change.)
+    # Most recent concrete application/entity mentioned or discovered by a
+    # diagnostic. This is deliberately separate from last_target: asking
+    # "is Spotify running?" executes a process-list diagnostic, but the next
+    # "close it" should refer to Spotify, not to the diagnostic itself.
+    last_referenced_app: Optional[str] = None
+    last_referenced_app_hint: Optional[str] = None
+
     open_apps: List[str] = field(default_factory=list)
-
-    # Populated by a future computer-state poller (section 14 of the spec).
-    # Present now so ContextEngine has a stable field to read even before
-    # anything writes to it.
     computer_state: Dict[str, Any] = field(default_factory=dict)
-
-    execution_state: str = "idle"  # idle | awaiting_confirmation | executing
+    execution_state: str = "idle"
 
     def note_successful_task(self, target: str, target_name: str, intent: str):
         self.last_target = target
@@ -44,12 +38,18 @@ class AgentState:
         if target_name and target_name not in self.open_apps:
             self.open_apps.append(target_name)
 
+    def note_referenced_app(self, process_name: str, hint: str = ""):
+        self.last_referenced_app = process_name
+        self.last_referenced_app_hint = hint or process_name
+
     def snapshot(self) -> Dict[str, Any]:
         return {
             "active_goal": self.active_goal,
             "last_target": self.last_target,
             "last_target_name": self.last_target_name,
             "last_intent": self.last_intent,
+            "last_referenced_app": self.last_referenced_app,
+            "last_referenced_app_hint": self.last_referenced_app_hint,
             "open_apps": list(self.open_apps),
             "computer_state": self.computer_state,
         }
