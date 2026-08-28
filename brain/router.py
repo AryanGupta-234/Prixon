@@ -1,4 +1,4 @@
-"""Provider routing with a deliberately local-only test mode."""
+"""Provider routing with a deliberately local-only development mode."""
 from __future__ import annotations
 
 from typing import Dict, List, Optional
@@ -14,17 +14,23 @@ from system import system_agent
 
 class ModelRouter:
     def __init__(self, providers: Optional[List[LLMProvider]] = None):
-        # In local-only mode do not even construct cloud clients. This makes a
-        # test run deterministic and prevents quota failures from contaminating
-        # the conversation path.
+        # LOCAL_ONLY_MODE is a hard development gate. Cloud providers are not
+        # constructed at all while it is enabled, regardless of stale .env
+        # values. They can be restored later by setting PRIXON_LOCAL_ONLY=false.
         default = [OllamaProvider()]
-        if config.CLOUD_LLM_ENABLED:
+        if config.CLOUD_LLM_ENABLED and not config.LOCAL_ONLY_MODE:
             default += [CerebrasProvider(), GroqProvider(), HuggingFaceProvider()]
         self._providers: Dict[str, LLMProvider] = {p.name: p for p in (providers or default)}
         self._working_provider: Optional[str] = None
         self._exhausted: set = set()
 
     def _provider_chain(self) -> List[str]:
+        if config.LOCAL_ONLY_MODE:
+            chain = ["local"] if "local" in self._providers and self._providers["local"].available() else []
+            if config.DEBUG:
+                print(f"[MODEL_ROUTER] LOCAL_ONLY_MODE=true chain={chain}", flush=True)
+            return chain
+
         preferred = config.LLM_PROVIDER if config.LLM_PROVIDER in self._providers else None
         fallback_order = [p for p in config.PROVIDER_FALLBACK_ORDER if p in self._providers]
         ordered = ([preferred] if preferred else []) + [p for p in fallback_order if p != preferred]
@@ -37,14 +43,7 @@ class ModelRouter:
                 advice = resource_policy.advise(snap)
             except Exception:
                 advice = None
-            # In local-only mode, resource pressure is advisory. We still need
-            # a brain to interpret the request, and Ollama is the only one.
-            if advice is not None and advice.avoid_local and not config.CLOUD_LLM_ENABLED:
-                advice = resource_policy.RoutingAdvice(
-                    avoid_local=False, prefer_local=True,
-                    reason=f"local-only mode retained despite {advice.reason}",
-                )
-            elif advice is not None and advice.avoid_local:
+            if advice is not None and advice.avoid_local:
                 remote_available = [p for p in available if p != "local"]
                 if remote_available:
                     available.remove("local")
@@ -86,9 +85,7 @@ class ModelRouter:
                 if config.DEBUG:
                     print(f"[MODEL_ROUTER] provider={name} failed kind={kind} error={exc}", flush=True)
                 if kind == "auth":
-                    raise RuntimeError(f"{name} rejected its credentials (check local configuration).") from exc
-                if kind == "quota":
-                    self._exhausted.add(name)
+                    raise RuntimeError("local Ollama rejected the request; check Ollama/model configuration.") from exc
                 continue
         raise RuntimeError(f"Local Ollama could not handle the request. Last error: {last_exc}") from last_exc
 
