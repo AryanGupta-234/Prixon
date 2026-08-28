@@ -7,10 +7,8 @@ from typing import Any, Dict, List, Optional
 
 import config
 
-
 MIN_TOP_SCORE = 0.55
 MIN_SCORE_GAP = 0.25
-
 
 @dataclass
 class Tier2Result:
@@ -20,7 +18,6 @@ class Tier2Result:
     confidence: float = 0.0
     reason: str = ""
     parameters: Optional[Dict[str, Any]] = None
-
 
 def classify(user_text: str, candidates: List[Dict]) -> Tier2Result:
     if not candidates:
@@ -33,11 +30,9 @@ def classify(user_text: str, candidates: List[Dict]) -> Tier2Result:
     gap = top_score - runner_up_score
     if gap < MIN_SCORE_GAP:
         return Tier2Result(False, reason=f"ambiguous: gap {gap:.2f} below {MIN_SCORE_GAP} vs runner-up")
-    return Tier2Result(True, target=top.get("target"), intent=top.get("intent"),
-                       confidence=min(0.95, top_score),
+    return Tier2Result(True, target=top.get("target"), intent=top.get("intent"), confidence=min(0.95, top_score),
                        reason=f"unambiguous lexical match (score {top_score:.2f}, gap {gap:.2f} vs runner-up)",
                        parameters=extract_entities(user_text))
-
 
 def classify_semantic(user_text: str, semantic_candidates: List[Dict], groups: Dict) -> Tier2Result:
     if not semantic_candidates:
@@ -51,15 +46,12 @@ def classify_semantic(user_text: str, semantic_candidates: List[Dict], groups: D
     if gap < config.SEMANTIC_MIN_GAP:
         return Tier2Result(False, reason=f"semantic ambiguous: gap {gap:.2f} below {config.SEMANTIC_MIN_GAP}")
     group = groups.get(top.get("target"))
-    return Tier2Result(True, target=top.get("target"), intent=group.intent if group else None,
-                       confidence=min(0.9, top_score),
+    return Tier2Result(True, target=top.get("target"), intent=group.intent if group else None, confidence=min(0.9, top_score),
                        reason=f"unambiguous semantic match (score {top_score:.2f}, gap {gap:.2f} vs runner-up)",
                        parameters=extract_entities(user_text))
 
-
 _PERCENT_RE = re.compile(r"\b(\d{1,3})\s?%|\b(\d{1,3})\s*percent\b")
 _DIRECTION_WORDS = ("up", "down", "left", "right", "louder", "quieter", "brighter", "dimmer")
-
 
 def extract_entities(text: str) -> Dict[str, Any]:
     entities: Dict[str, Any] = {}
@@ -73,11 +65,11 @@ def extract_entities(text: str) -> Dict[str, Any]:
             break
     return entities
 
-
 _CLOSE_VERBS_RE = re.compile(r"\b(close|quit|exit|kill|terminate|shut\s*down|stop)\b\s+(.*)", re.I)
 _RUNNING_RE = re.compile(
     r"\b(?:is|are|does)\s+(?P<app>.+?)\s+(?:currently\s+)?(?:running|open|active)\b|"
-    r"\b(?:check|chk|see|tell\s+me)\s+(?:if|whether)\s+(?P<app2>.+?)\s+(?:is|are)\s+(?:currently\s+)?(?:running|open|active)\b",
+    r"\b(?:check|chk|see|tell\s+me)\s+(?:if|whether)\s+(?P<app2>.+?)\s+(?:is|are)\s+(?:currently\s+)?(?:running|open|active)\b|"
+    r"\b(?:check|chk|see|tell\s+me)\s+(?:for)\s+(?P<app3>.+?)\s+(?:running|open|active)\b",
     re.I,
 )
 _APP_NAME_FILLER_WORDS = {
@@ -85,20 +77,17 @@ _APP_NAME_FILLER_WORDS = {
     "please", "for", "me", "now", "right", "down", "up", "bro", "man", "pls", "plz", "u", "can",
 }
 
-
 def extract_app_name_hint(text: str) -> Optional[str]:
     m = _CLOSE_VERBS_RE.search(text)
     if not m:
         return None
     return _clean_app_hint(m.group(2))
 
-
 def extract_running_app_hint(text: str) -> Optional[str]:
     m = _RUNNING_RE.search(text)
     if not m:
         return None
-    return _clean_app_hint(m.group("app") or m.group("app2"))
-
+    return _clean_app_hint(m.group("app") or m.group("app2") or m.group("app3"))
 
 def _clean_app_hint(value: str) -> Optional[str]:
     words = [w for w in re.findall(r"[a-z0-9]+", value.lower()) if w not in _APP_NAME_FILLER_WORDS]
