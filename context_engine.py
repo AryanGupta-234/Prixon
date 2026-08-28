@@ -52,13 +52,14 @@ def _compact_agent_context(state: AgentState, memory: UnifiedMemory, patterns=No
     snapshot = system_agent.latest_snapshot()
     state.computer_state = _snapshot_context(snapshot)
     recent = [{"event": ep.event_type, "target": ep.target_name or ep.target, "intent": ep.intent, "success": ep.success} for ep in memory.episodes[-8:]]
-    learned = patterns.context() if patterns is not None else getattr(state, "learned_context", {})
+    learned = patterns.context() if patterns is not None else {}
     return {
         "active_goal": state.active_goal,
         "last_successful_target": state.last_target_name,
         "last_successful_intent": state.last_intent,
         "last_referenced_app": state.last_referenced_app,
         "last_referenced_app_hint": state.last_referenced_app_hint,
+        "reference_age_turns": state.snapshot().get("reference_age_turns"),
         "tracked_apps": state.open_apps[-12:],
         "world_state": state.computer_state,
         "learned_experience": state.learned_context,
@@ -70,6 +71,7 @@ def _compact_agent_context(state: AgentState, memory: UnifiedMemory, patterns=No
 def route(user_text: str, candidates: List[Dict], state: AgentState, memory: UnifiedMemory,
           groups: Dict[str, ActionGroup], assistant_name: Optional[str] = None,
           broad_search: bool = False, semantic_index=None, patterns=None) -> RoutedResult:
+    state.begin_turn()
     candidates = goal_engine.bias_candidates(candidates, state.active_goal, groups)
     tier1 = reference_resolver.resolve(user_text, state)
     if tier1.resolved:
