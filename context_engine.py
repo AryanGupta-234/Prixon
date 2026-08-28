@@ -1,6 +1,7 @@
 """Context engine: references -> lexical -> semantic -> grounded LLM reasoning."""
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -31,73 +32,34 @@ def _group_for_action(groups: Dict[str, ActionGroup], action: str):
 
 
 def _snapshot_context(snapshot) -> Dict[str, Any]:
-    """Convert the live system snapshot into a small world-state view.
-
-    The brain needs facts that change its decision, not a raw process dump.
-    Keep only current resource levels, connectivity, power and the heaviest
-    processes so prompts stay small and grounded.
-    """
+    """Create a compact, decision-relevant world model; never expose raw telemetry wholesale."""
     if snapshot is None:
         return {"available": False}
     return {
         "available": True,
-        "age_seconds": round(max(0.0, __import__("time").time() - snapshot.timestamp), 1),
-        "cpu": {
-            "usage_percent": snapshot.cpu.usage_percent,
-            "cores": snapshot.cpu.core_count,
-            "frequency_mhz": snapshot.cpu.frequency_mhz,
-        },
-        "memory": {
-            "percent": snapshot.memory.percent,
-            "available_mb": snapshot.memory.available_mb,
-            "used_mb": snapshot.memory.used_mb,
-            "total_mb": snapshot.memory.total_mb,
-        },
-        "disk": {
-            "free_gb": snapshot.disk.free_gb,
-            "used_percent": snapshot.disk.used_percent,
-        },
+        "age_seconds": round(max(0.0, time.time() - snapshot.timestamp), 1),
+        "cpu": {"usage_percent": snapshot.cpu.usage_percent, "cores": snapshot.cpu.core_count,
+                "frequency_mhz": snapshot.cpu.frequency_mhz},
+        "memory": {"percent": snapshot.memory.percent, "available_mb": snapshot.memory.available_mb,
+                    "used_mb": snapshot.memory.used_mb, "total_mb": snapshot.memory.total_mb},
+        "disk": {"free_gb": snapshot.disk.free_gb, "used_percent": snapshot.disk.used_percent},
         "network": {"online": snapshot.network.online},
-        "battery": {
-            "present": snapshot.battery.present,
-            "percent": snapshot.battery.percent,
-            "charging": snapshot.battery.charging,
-        },
-        "gpu": {
-            "available": snapshot.gpu.available,
-            "utilization_percent": snapshot.gpu.utilization_percent,
-            "vram_used_mb": snapshot.gpu.vram_used_mb,
-            "vram_total_mb": snapshot.gpu.vram_total_mb,
-        },
-        "top_cpu": [
-            {"name": p.name, "pid": p.pid, "cpu_percent": p.cpu_percent}
-            for p in snapshot.processes.top_by_cpu[:5]
-        ],
-        "top_memory": [
-            {"name": p.name, "pid": p.pid, "memory_mb": p.memory_mb}
-            for p in snapshot.processes.top_by_memory[:5]
-        ],
+        "battery": {"present": snapshot.battery.present, "percent": snapshot.battery.percent,
+                     "charging": snapshot.battery.charging},
+        "gpu": {"available": snapshot.gpu.available, "utilization_percent": snapshot.gpu.utilization_percent,
+                "vram_used_mb": snapshot.gpu.vram_used_mb, "vram_total_mb": snapshot.gpu.vram_total_mb},
+        "top_cpu": [{"name": p.name, "pid": p.pid, "cpu_percent": p.cpu_percent}
+                    for p in snapshot.processes.top_by_cpu[:5]],
+        "top_memory": [{"name": p.name, "pid": p.pid, "memory_mb": p.memory_mb}
+                       for p in snapshot.processes.top_by_memory[:5]],
     }
 
 
 def _compact_agent_context(state: AgentState, memory: UnifiedMemory) -> Dict[str, Any]:
-    """Build the assistant's current world model for the reasoning tier."""
-    try:
-        snapshot = system_agent.latest_snapshot()
-    except Exception:
-        snapshot = None
-
+    snapshot = system_agent.latest_snapshot()
     state.computer_state = _snapshot_context(snapshot)
-
-    recent = []
-    for ep in memory.episodes[-8:]:
-        recent.append({
-            "event": ep.event_type,
-            "target": ep.target_name or ep.target,
-            "intent": ep.intent,
-            "success": ep.success,
-        })
-
+    recent = [{"event": ep.event_type, "target": ep.target_name or ep.target,
+               "intent": ep.intent, "success": ep.success} for ep in memory.episodes[-8:]]
     return {
         "active_goal": state.active_goal,
         "last_successful_target": state.last_target_name,
@@ -106,6 +68,7 @@ def _compact_agent_context(state: AgentState, memory: UnifiedMemory) -> Dict[str
         "last_referenced_app_hint": state.last_referenced_app_hint,
         "tracked_apps": state.open_apps[-12:],
         "world_state": state.computer_state,
+        "learned_experience": state.learned_context,
         "recent_events": recent,
     }
 
@@ -123,49 +86,38 @@ def route(user_text: str, candidates: List[Dict], state: AgentState, memory: Uni
             if group:
                 target = group.target
         if target:
-            return RoutedResult(
-                NLUResult(
-                    match_target=target, confidence="high", reply="On it.",
-                    intent=tier1.intent or "unknown", parameters={
-                        "app_name_hint": tier1.target_name
-                    } if tier1.action_hint == "close_app_dynamic" else {},
-                    reference=tier1.reference,
-                    raw={"tier1_reason": tier1.reason},
-                ),
-                "tier1",
-                {"reference": tier1.reference, "confidence": tier1.confidence,
-                 "reason": tier1.reason},
-            )
+            return RoutedResult(NLUResult(
+                match_target=target, confidence="high", reply="On it.",
+                intent=tier1.intent or "unknown", parameters={
+                    "app_name_hint": tier1.target_name
+                } if tier1.action_hint == "close_app_dynamic" else {},
+                reference=tier1.reference, raw={"tier1_reason": tier1.reason}),
+                "tier1", {"reference": tier1.reference, "confidence": tier1.confidence,
+                           "reason": tier1.reason})
 
     t2 = tier2.classify(user_text, candidates)
     if t2.resolved:
-        result = NLUResult(
-            match_target=t2.target, confidence="high", reply="On it.",
-            intent=t2.intent or "unknown", parameters=t2.parameters or {}, reference="none",
-            raw={"tier2_reason": t2.reason},
-        )
-        return RoutedResult(result, "tier2-lexical", {
-            "tier1_reason": tier1.reason, "confidence": t2.confidence, "reason": t2.reason,
-        })
+        result = NLUResult(match_target=t2.target, confidence="high", reply="On it.",
+                           intent=t2.intent or "unknown", parameters=t2.parameters or {}, reference="none",
+                           raw={"tier2_reason": t2.reason})
+        return RoutedResult(result, "tier2-lexical", {"tier1_reason": tier1.reason,
+                                                        "confidence": t2.confidence, "reason": t2.reason})
 
     t2_semantic = tier2.Tier2Result(False, reason="semantic index not available")
     if semantic_index is not None and semantic_index.ready:
         semantic_candidates = semantic_index.search(user_text)
         t2_semantic = tier2.classify_semantic(user_text, semantic_candidates, groups)
         if t2_semantic.resolved:
-            result = NLUResult(
-                match_target=t2_semantic.target, confidence="high", reply="On it.",
-                intent=t2_semantic.intent or "unknown", parameters=t2_semantic.parameters or {},
-                reference="none", raw={"tier2_semantic_reason": t2_semantic.reason},
-            )
-            return RoutedResult(result, "tier2-semantic", {
-                "tier1_reason": tier1.reason, "tier2_lexical_reason": t2.reason,
-                "confidence": t2_semantic.confidence, "reason": t2_semantic.reason,
-            })
+            result = NLUResult(match_target=t2_semantic.target, confidence="high", reply="On it.",
+                               intent=t2_semantic.intent or "unknown", parameters=t2_semantic.parameters or {},
+                               reference="none", raw={"tier2_semantic_reason": t2_semantic.reason})
+            return RoutedResult(result, "tier2-semantic", {"tier1_reason": tier1.reason,
+                                                             "tier2_lexical_reason": t2.reason,
+                                                             "confidence": t2_semantic.confidence,
+                                                             "reason": t2_semantic.reason})
 
     memory.conversation.slots["live_agent_context"] = _compact_agent_context(state, memory)
     result = llm_resolve(user_text, candidates, assistant_name, broad_search, memory.conversation)
-    return RoutedResult(result, "tier3", {
-        "raw": result.raw, "tier1_reason": tier1.reason, "tier2_lexical_reason": t2.reason,
-        "tier2_semantic_reason": t2_semantic.reason,
-    })
+    return RoutedResult(result, "tier3", {"raw": result.raw, "tier1_reason": tier1.reason,
+                                           "tier2_lexical_reason": t2.reason,
+                                           "tier2_semantic_reason": t2_semantic.reason})
