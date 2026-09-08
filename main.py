@@ -5,7 +5,10 @@ import sys
 import time
 
 try:
-    sys.stdout.reconfigure(line_buffering=True)
+    # Windows consoles can default to cp1252, while health and voice output
+    # contain Unicode symbols.  Without an explicit encoding, even
+    # `--healthcheck` can crash while printing an otherwise valid report.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 except AttributeError:
     pass
 
@@ -183,7 +186,28 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
         patterns.observe_action(group.target_name, result.intent, False)
         return
 
-    verified_ok = dispatched.ok and (v is None or v.confirmed is not False)
+    # An accepted launch/URI handoff is not evidence that the requested
+    # effect happened.  Do not update task state, memory, or training data as
+    # successful unless a verification strategy actually confirmed it.
+    if v is None or not v.verified or v.confirmed is None:
+        evidence = v.evidence if v else "no verification strategy is available"
+        say(f"I sent the request, but I couldn't verify the result ({evidence}).", use_voice)
+        memory.record_event("task_failed", intent=result.intent, target=result.match_target,
+                            target_name=group.target_name, success=False,
+                            parameters={**result.parameters, "verification": v.to_dict() if v else None})
+        experience.observe("task_failed", result.match_target, group.target_name, False)
+        patterns.observe_action(group.target_name, result.intent, False)
+        return
+    if not v.confirmed:
+        say(f"I tried, but I couldn't confirm it actually opened ({v.evidence}).", use_voice)
+        memory.record_event("task_failed", intent=result.intent, target=result.match_target,
+                            target_name=group.target_name, success=False,
+                            parameters={**result.parameters, "verification": v.to_dict()})
+        experience.observe("task_failed", result.match_target, group.target_name, False)
+        patterns.observe_action(group.target_name, result.intent, False)
+        return
+
+    verified_ok = True
     concrete_name = resolved_process or group.target_name
     previous = state.last_target_name
     state.note_successful_task(result.match_target, concrete_name, result.intent, resolved_name=resolved_process)
@@ -200,9 +224,7 @@ def handle_command(user_text, index, use_voice, state: AgentState, memory: Unifi
     training_log.log_verified_interaction(user_text, routed.tier, result.raw, verified_ok)
     _trace("MEMORY", "episode + experience + patterns stored")
 
-    if v and v.verified and v.confirmed is False:
-        say(f"I tried, but I couldn't confirm it actually opened ({v.evidence}).", use_voice)
-    elif dispatched.data:
+    if dispatched.data:
         concise = _diagnostic_reply(user_text, group, dispatched.data, state)
         if concise:
             say(concise, use_voice)

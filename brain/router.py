@@ -85,9 +85,12 @@ class ModelRouter:
                 if config.DEBUG:
                     print(f"[MODEL_ROUTER] provider={name} failed kind={kind} error={exc}", flush=True)
                 if kind == "auth":
-                    raise RuntimeError("local Ollama rejected the request; check Ollama/model configuration.") from exc
+                    # A bad credential for one optional provider must not
+                    # prevent another configured provider from serving the
+                    # request.  Keep it out of the chain for this session.
+                    self._exhausted.add(name)
                 continue
-        raise RuntimeError(f"Local Ollama could not handle the request. Last error: {last_exc}") from last_exc
+        raise RuntimeError(f"No configured LLM provider could handle the request. Last error: {last_exc}") from last_exc
 
 
 _default_router: Optional[ModelRouter] = None

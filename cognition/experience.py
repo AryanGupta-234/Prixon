@@ -48,7 +48,10 @@ class ExperienceModel:
             else:
                 self.failures[key] += 1
             previous = self.recent[-1].get("target") if self.recent else None
-            if previous and previous != key:
+            # Repeating an action is still a meaningful sequence (for
+            # example, retrying the same diagnostic).  Suppressing self
+            # transitions made that common behavior invisible to context.
+            if previous:
                 self.transitions[(previous, key)] += 1
             self.recent.append({"event": event_type, "target": key, "success": bool(success), "timestamp": time.time()})
             self._save_locked()

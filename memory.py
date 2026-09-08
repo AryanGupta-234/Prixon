@@ -77,16 +77,18 @@ class UnifiedMemory:
         try:
             with open(self.episodic_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()[-limit:]
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
+        except OSError:
+            return
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
                 d = json.loads(line)
                 self.episodes.append(Episode(**d))
-        except Exception:
-            # A corrupt/partial log should never prevent the assistant from
-            # starting -- worst case, episodic memory starts empty this run.
-            pass
+            except (json.JSONDecodeError, TypeError, ValueError):
+                # A partial write must not hide valid records that follow it.
+                continue
 
     def record_event(self, event_type: str, intent: str = "", target: str = "",
                       target_name: str = "", parameters: Optional[Dict[str, Any]] = None,
