@@ -1,0 +1,59 @@
+version: 1
+
+model:
+  name_env: PRIXON_BASE_MODEL
+  name_default: Qwen/Qwen2.5-7B-Instruct
+  max_seq_length_env: PRIXON_MAX_SEQ_LENGTH
+  max_seq_length_default: 8192
+  load_in_4bit: true
+
+lora:
+  rank: 16
+  alpha: 16
+  dropout: 0.0
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+training:
+  output_dir_env: PRIXON_TRAIN_OUTPUT
+  output_dir_default: training/runs/prixon-qwen
+  epochs: 2
+  learning_rate: 0.0002
+  train_batch_size: 2
+  gradient_accumulation_steps: 4
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  logging_steps: 10
+  save_steps: 250
+  save_total_limit: 2
+  gradient_checkpointing: true
+  optimizer: adamw_8bit
+  scheduler: cosine
+  report_to: none
+
+ data:
+  train_env: PRIXON_TRAIN_FILE
+  train_default: training/output/prixon_train.jsonl
+  validation_env: PRIXON_VALIDATION_FILE
+  validation_default: training/output/prixon_validation.jsonl
+
+export:
+  gguf_quantization_env: PRIXON_GGUF_QUANT
+  gguf_quantization_default: q4_k_m
+  merged_dir_env: PRIXON_MERGED_OUTPUT
+  merged_dir_default: training/runs/export/merged
+  gguf_dir_env: PRIXON_GGUF_OUTPUT
+  gguf_dir_default: training/runs/export/gguf
+
+cloud:
+  push_to_hub_env: PRIXON_PUSH_TO_HUB
+  push_to_hub_default: "false"
+  hub_repo_env: PRIXON_HUB_REPO
+  hub_repo_default: ""
+  hf_token_env: HF_TOKEN
