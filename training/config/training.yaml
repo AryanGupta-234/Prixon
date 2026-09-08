@@ -36,6 +36,8 @@ training:
   optimizer: adamw_8bit
   scheduler: cosine
   report_to: none
+  seed_env: PRIXON_TRAIN_SEED
+  seed_default: 3407
 
 data:
   train_env: PRIXON_TRAIN_FILE
