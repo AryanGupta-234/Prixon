@@ -39,7 +39,7 @@ sources:
     split: train
     streaming: true
     weight: 1.0
-    license: apache-2.0
+    license: cc-by-4.0
 
   - name: hermes_function_calling
     enabled: true
@@ -68,6 +68,7 @@ sources:
     dataset: nvidia/Nemotron-RL-Agentic-Terminal-Pivot-v1
     split: train
     streaming: true
+    max_examples: null
     weight: 0.75
     license: cc-by-4.0
 
