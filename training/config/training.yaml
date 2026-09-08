@@ -37,7 +37,7 @@ training:
   scheduler: cosine
   report_to: none
 
- data:
+data:
   train_env: PRIXON_TRAIN_FILE
   train_default: training/output/prixon_train.jsonl
   validation_env: PRIXON_VALIDATION_FILE
