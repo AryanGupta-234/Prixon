@@ -1,87 +1,88 @@
-# Prixon bulk training corpus
+# Prixon bulk training + QLoRA pipeline
 
-This branch builds a large post-training corpus without modifying `main` and without embedding machine-specific paths, credentials, provider URLs, or base-model choices in Python code.
+This branch contains the cloud-first training pipeline for turning Prixon's existing action data plus external agent/tool-use corpora into a configurable SFT dataset for Qwen-family models.
 
-The pipeline combines Prixon's existing action catalog with external agent/tool-use datasets and converts them into the same chat/tool contract used by the training stack.
+## Architecture alignment
 
-## Why this matches Prixon's architecture
+Prixon's runtime separates NLU, context, memory, goal handling, execution, tool routing, and verification. The dataset builder mirrors the runtime contract instead of inventing an unrelated tool vocabulary. The local `data/windows_automation_10000.jsonl` corpus is read as the source of truth for Prixon capabilities, and the system prompt is loaded from the runtime NLU module by configuration. The existing tool router also derives capabilities from the same action catalog rather than a second manually maintained registry. 
 
-Prixon's runtime already separates NLU, context, memory, goal handling, execution, tool routing, and verification. The dataset builder therefore does **not** invent a second hardcoded tool registry. The local catalog is read from the existing JSONL data and converted into candidate-selection, negative, and reference-resolution examples.
+## Dataset sources
 
-Local examples can produce three tracks:
-
-- `prixon_nlu`: select the correct allow-listed capability.
-- `prixon_nlu_negative`: refuse to invent an unavailable capability.
-- `prixon_context`: resolve references against recent conversation state.
-
-External sources provide broader function calling, terminal-agent behavior, and multi-tool trajectories. All source identifiers, limits, weights, split ratios, paths, enablement, and output locations live in `training/config/dataset.yaml` and can be overridden through the configured environment variables.
-
-## Current bulk mix
-
-The configured mix uses:
+The default YAML mix contains:
 
 - Prixon's existing Windows automation corpus.
-- xLAM function-calling data.
-- Hermes function-calling data.
+- xLAM function-calling (60K rows on Hugging Face).
+- Hermes function-calling.
 - NVIDIA Nemotron function-calling pivot data.
-- NVIDIA Nemotron terminal-agent data.
-- The Qwen3 subset of Toucan-1.5M, capped by configuration rather than copied into this repository.
+- NVIDIA Nemotron terminal-agent data (31K rows on the current release).
+- The Qwen3 subset of Agent-Ark/Toucan-1.5M, capped by YAML so it is streamed rather than vendored.
 
-Toucan-1.5M contains about 1.65M trajectories across multiple configurations and is Apache-2.0 licensed; the configured Qwen3 subset is streamed rather than vendored locally. The source contains multi-turn and multi-tool trajectories, which is useful for agentic SFT. citeturn2search0turn2search1
+Toucan-1.5M currently reports 1,646,546 total trajectories across configurations and includes multi-turn, multi-round, sequential and parallel tool calls. The dataset is Apache-2.0. citeturn951248search3
 
-NVIDIA's function-calling pivot dataset is 9,620 rows and CC-BY-4.0; its terminal counterpart is about 1.37 GB and also CC-BY-4.0. citeturn1search0turn1search2
+The current xLAM parsed source contains 60,000 training rows and is CC-BY-4.0. citeturn951248search0
 
-## Build on a cloud GPU machine
+The current NVIDIA Nemotron terminal dataset exposes 31,111 samples and is CC-BY-4.0. citeturn951248search1turn951248search2
+
+## Build the corpus on a cloud GPU
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r training/requirements.txt
 python training/build_dataset.py
+python training/evaluate_dataset.py training/output/prixon_train.jsonl training/output/prixon_validation.jsonl training/output/prixon_eval.jsonl
 ```
 
-The builder streams external Hugging Face sources, so the raw external corpora do not need to be committed to Git.
+The builder streams external Hugging Face sources. Generated output is intentionally ignored by Git because it can become very large.
 
-Output:
-
-```text
-training/output/prixon_train.jsonl
-training/output/prixon_validation.jsonl
-training/output/prixon_eval.jsonl
-training/output/manifest.json
-```
-
-Generated output is ignored by Git because the resulting corpus can be very large.
-
-## Local Prixon data only
+### Local Prixon data only
 
 ```bash
 python training/build_dataset.py --no-external
 ```
 
-## Selected sources only
+### Select sources
 
 ```bash
 python training/build_dataset.py --source prixon_action_catalog --source toucan_qwen3
 ```
 
-## Generic external dataset conversion
+### Change source sizes/weights
 
-For an external dataset whose chat trajectory is stored as a JSON/string field, the generic converter can normalize it without adding dataset-specific logic to Prixon's Python code:
+Edit only `training/config/dataset.yaml`, for example `max_examples`, `weight`, `enabled`, ratios, or output locations. Do not modify the Python pipeline for normal dataset experiments.
+
+## QLoRA training
+
+After the dataset build and validation:
 
 ```bash
-python training/prepare_external.py \
-  --dataset <DATASET_ID> \
-  --subset <OPTIONAL_SUBSET> \
-  --split train \
-  --messages-field messages \
-  --tools-field available_tools \
-  --output training/cache/external.jsonl \
-  --streaming
+python training/train_qwen.py
 ```
 
-The values are intentionally command-line/config inputs rather than constants in the converter.
+To resume from the latest checkpoint:
 
-## Configuration
+```bash
+python training/train_qwen.py --resume
+```
 
-Edit `training/config/dataset.yaml` instead of changing Python code. The dataset pipeline is designed so the same code can be reused with different datasets, source weights, limits, assistant names, output locations, and train/validation/eval ratios.
+The base model, sequence length, LoRA settings, optimizer, learning rate, batch/accumulation settings, seed, paths, and Hub behavior come from `training/config/training.yaml` or its configured environment variables.
 
-Review each third-party dataset's license and terms before redistributing a derived corpus or model. The pipeline streams third-party data and does not vendor their raw files into this repository.
+The default base model is `Qwen/Qwen2.5-7B-Instruct` and is only a configuration default, not embedded in the training implementation.
+
+## Export for Ollama
+
+After training, export the adapter to merged weights and GGUF:
+
+```bash
+python training/export_qwen.py --adapter training/runs/prixon-qwen/adapter
+```
+
+The GGUF quantization and export directories are configurable in `training/config/training.yaml`.
+
+## Hugging Face authentication
+
+For private/gated data or model pushes, provide credentials through environment variables such as `HF_TOKEN`; never put tokens in source code or YAML committed to the repository.
+
+## Licensing
+
+The repository does not vendor third-party raw datasets. Before publishing a derived dataset or model, review the current license/terms of every enabled source and preserve required attribution. xLAM is currently listed as CC-BY-4.0. citeturn951248search0 Nemotron terminal/function-calling releases are currently listed as CC-BY-4.0. citeturn951248search1turn951248search9 Toucan-1.5M is currently listed as Apache-2.0. citeturn951248search3
