@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Cloud-first QLoRA SFT entry point for Prixon.
-
-All model, dataset, training, export, and Hub settings come from
-training/config/training.yaml or environment variables. No credentials,
-provider URLs, or local machine paths are embedded in this file.
-"""
+"""Cloud-first QLoRA SFT entry point for Prixon."""
 from __future__ import annotations
 
 import argparse
@@ -14,7 +9,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import yaml
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -52,9 +46,8 @@ def load_jsonl(path: Path):
                 row = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"Invalid JSONL at {path}:{line_no}: {exc}") from exc
-            if not isinstance(row, dict) or not row.get("messages"):
-                continue
-            yield row
+            if isinstance(row, dict) and row.get("messages"):
+                yield row
 
 
 def latest_checkpoint(output_dir: Path) -> Optional[str]:
@@ -66,10 +59,8 @@ def latest_checkpoint(output_dir: Path) -> Optional[str]:
             try:
                 checkpoints.append((int(child.name.split("-")[-1]), child))
             except ValueError:
-                pass
-    if not checkpoints:
-        return None
-    return str(max(checkpoints, key=lambda item: item[0])[1])
+                continue
+    return str(max(checkpoints, key=lambda item: item[0])[1]) if checkpoints else None
 
 
 def main() -> None:
@@ -89,6 +80,7 @@ def main() -> None:
     model_name = str(env_value(model_cfg.get("name_env"), model_cfg.get("name_default")))
     max_seq_length = int(env_value(model_cfg.get("max_seq_length_env"), model_cfg.get("max_seq_length_default")))
     load_in_4bit = bool_value(model_cfg.get("load_in_4bit", True)) and not args.no_4bit
+    seed = int(env_value(train_cfg.get("seed_env"), train_cfg.get("seed_default", 3407)))
 
     train_file = resolve_path(str(env_value(data_cfg.get("train_env"), data_cfg.get("train_default"))))
     validation_file = resolve_path(str(env_value(data_cfg.get("validation_env"), data_cfg.get("validation_default"))))
@@ -104,9 +96,7 @@ def main() -> None:
         from unsloth import FastLanguageModel
         from trl import SFTConfig, SFTTrainer
     except ImportError as exc:
-        raise RuntimeError(
-            "Install training/requirements.txt plus the cloud training stack before running this script."
-        ) from exc
+        raise RuntimeError("Install training/requirements.txt and the cloud training dependencies first.") from exc
 
     print(f"Loading base model: {model_name}")
     model, tokenizer = FastLanguageModel.from_pretrained(
@@ -123,15 +113,13 @@ def main() -> None:
         lora_dropout=float(lora_cfg["dropout"]),
         bias="none",
         use_gradient_checkpointing="unsloth" if bool_value(train_cfg.get("gradient_checkpointing", True)) else False,
-        random_state=3407,
+        random_state=seed,
     )
 
     train_rows = list(load_jsonl(train_file))
     validation_rows = list(load_jsonl(validation_file))
-    if not train_rows:
-        raise RuntimeError("Training dataset is empty")
-    if not validation_rows:
-        raise RuntimeError("Validation dataset is empty")
+    if not train_rows or not validation_rows:
+        raise RuntimeError("Training and validation datasets must both contain examples.")
 
     train_dataset = Dataset.from_list(train_rows)
     validation_dataset = Dataset.from_list(validation_rows)
@@ -150,12 +138,11 @@ def main() -> None:
         lr_scheduler_type=str(train_cfg["scheduler"]),
         optim=str(train_cfg["optimizer"]),
         report_to=str(train_cfg["report_to"]),
+        seed=seed,
         dataset_text_field="text",
         max_length=max_seq_length,
     )
 
-    # Keep compatibility across TRL versions. Recent TRL uses max_length;
-    # older versions may reject it and are handled below.
     try:
         sft_args = SFTConfig(**sft_kwargs)
     except TypeError:
@@ -164,14 +151,9 @@ def main() -> None:
         sft_args = SFTConfig(**sft_kwargs)
 
     def formatting_func(examples):
-        messages_batch = examples["messages"]
         return [
-            tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-            for messages in messages_batch
+            tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+            for messages in examples["messages"]
         ]
 
     trainer_kwargs = dict(
@@ -182,8 +164,6 @@ def main() -> None:
         formatting_func=formatting_func,
     )
 
-    # Newer TRL names the tokenizer argument processing_class; older versions
-    # use tokenizer. Try the current interface first, then the legacy one.
     try:
         trainer = SFTTrainer(processing_class=tokenizer, **trainer_kwargs)
     except TypeError:
@@ -194,15 +174,16 @@ def main() -> None:
         print(f"Resuming from checkpoint: {resume_from}")
 
     trainer.train(resume_from_checkpoint=resume_from)
-    trainer.save_model(str(output_dir / "adapter"))
-    tokenizer.save_pretrained(str(output_dir / "adapter"))
+    adapter_dir = output_dir / "adapter"
+    trainer.save_model(str(adapter_dir))
+    tokenizer.save_pretrained(str(adapter_dir))
 
     push = bool_value(env_value(cloud_cfg.get("push_to_hub_env"), cloud_cfg.get("push_to_hub_default", False)))
     hub_repo = str(env_value(cloud_cfg.get("hub_repo_env"), cloud_cfg.get("hub_repo_default", ""))).strip()
     if push:
         if not hub_repo:
-            raise RuntimeError("PRIXON_HUB_REPO is required when PRIXON_PUSH_TO_HUB=true")
-        print(f"Pushing adapter to Hub repo: {hub_repo}")
+            raise RuntimeError("Hub repository is required when cloud.push_to_hub is enabled.")
+        os.environ.setdefault("HF_TOKEN", str(env_value(cloud_cfg.get("hf_token_env"), "")))
         trainer.push_to_hub(hub_repo)
 
     summary = {
@@ -210,10 +191,12 @@ def main() -> None:
         "train_examples": len(train_rows),
         "validation_examples": len(validation_rows),
         "output_dir": str(output_dir),
-        "adapter_dir": str(output_dir / "adapter"),
+        "adapter_dir": str(adapter_dir),
         "hub_push": push,
         "hub_repo": hub_repo if push else None,
+        "seed": seed,
     }
+    output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "training_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))
 
