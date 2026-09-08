@@ -71,6 +71,18 @@ sources:
     weight: 0.75
     license: cc-by-4.0
 
+  - name: toucan_qwen3
+    enabled: true
+    kind: huggingface
+    adapter: openai_tool_messages
+    dataset: Agent-Ark/Toucan-1.5M
+    subset: Qwen3
+    split: train
+    streaming: true
+    max_examples: 120000
+    weight: 0.35
+    license: apache-2.0
+
 augmentation:
   local_catalog:
     create_negative_examples: true
