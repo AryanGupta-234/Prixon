@@ -1,0 +1,86 @@
+version: 1
+
+project:
+  name_env: ASSISTANT_NAME
+  name_default: Prixon
+  system_prompt:
+    source: python_attribute
+    module_path: nlu.py
+    attribute: SYSTEM_PROMPT
+
+build:
+  seed_env: PRIXON_DATASET_SEED
+  seed_default: 3407
+  output_dir_env: PRIXON_DATASET_OUTPUT
+  output_dir_default: training/output
+  train_ratio: 0.96
+  validation_ratio: 0.02
+  eval_ratio: 0.02
+  deduplicate: true
+  shuffle: true
+  candidate_count: 10
+  max_examples_per_source: null
+
+sources:
+  - name: prixon_action_catalog
+    enabled: true
+    kind: local_jsonl
+    adapter: prixon_nlu
+    path_env: ASSISTANT_DATA_PATH
+    path_default: data/windows_automation_10000.jsonl
+    weight: 3.0
+    license: project-owned
+
+  - name: xlam_function_calling
+    enabled: true
+    kind: huggingface
+    adapter: openai_tool_messages
+    dataset: minpeter/xlam-function-calling-60k-parsed
+    split: train
+    streaming: true
+    weight: 1.0
+    license: cc-by-4.0
+
+  - name: hermes_function_calling
+    enabled: true
+    kind: huggingface
+    adapter: hermes_conversations
+    dataset: NousResearch/hermes-function-calling-v1
+    split: train
+    streaming: true
+    weight: 1.0
+    license: apache-2.0
+
+  - name: nemotron_function_calling
+    enabled: true
+    kind: huggingface
+    adapter: nemotron_responses
+    dataset: nvidia/Nemotron-RL-Agentic-Function-Calling-Pivot-v1
+    split: train
+    streaming: true
+    weight: 1.0
+    license: cc-by-4.0
+
+  - name: nemotron_terminal
+    enabled: false
+    kind: huggingface
+    adapter: nemotron_responses
+    dataset: nvidia/Nemotron-RL-Agentic-Terminal-Pivot-v1
+    split: train
+    streaming: true
+    weight: 0.5
+    license: cc-by-4.0
+
+augmentation:
+  local_catalog:
+    create_negative_examples: true
+    create_context_examples: true
+    reference_request: do that again
+    success_reply: On it.
+    no_match_reply: I don't have an allowed action for that.
+
+quality:
+  min_user_chars: 2
+  min_assistant_chars: 2
+  max_chars_per_example: 50000
+  required_roles: [user, assistant]
