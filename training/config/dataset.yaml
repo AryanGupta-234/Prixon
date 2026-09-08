@@ -39,7 +39,7 @@ sources:
     split: train
     streaming: true
     weight: 1.0
-    license: cc-by-4.0
+    license: apache-2.0
 
   - name: hermes_function_calling
     enabled: true
@@ -62,13 +62,13 @@ sources:
     license: cc-by-4.0
 
   - name: nemotron_terminal
-    enabled: false
+    enabled: true
     kind: huggingface
     adapter: nemotron_responses
     dataset: nvidia/Nemotron-RL-Agentic-Terminal-Pivot-v1
     split: train
     streaming: true
-    weight: 0.5
+    weight: 0.75
     license: cc-by-4.0
 
 augmentation:
